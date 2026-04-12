@@ -1,7 +1,11 @@
 import os
 import discord
+import io
+import mimetypes
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
+from tools import TOOLS, TOOL_DECLARATIONS
 
 # Load environment variables
 load_dotenv()
@@ -22,10 +26,10 @@ intents = discord.Intents.default()
 intents.message_content = True  # Required to read message content
 
 class GeminiBot(discord.Client):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
     async def on_ready(self):
+        # Set bot presence
+        activity = discord.Activity(type=discord.ActivityType.listening, name="your requests")
+        await self.change_presence(status=discord.Status.online, activity=activity)
         print(f'Logged in as {self.user} (ID: {self.user.id})')
         print('------')
 
@@ -34,74 +38,120 @@ class GeminiBot(discord.Client):
         if message.author == self.user:
             return
 
-        # Check if the message is in a thread
         is_in_thread = isinstance(message.channel, discord.Thread)
-        
-        # Check if the bot was mentioned
         bot_mentioned = self.user in message.mentions
 
-        # 1. If we are in a regular channel and mentioned, create a thread
+        # 1. Start a new thread if mentioned in a regular channel
         if not is_in_thread and bot_mentioned:
-            # Remove the bot mention from the prompt
-            user_prompt = message.clean_content.replace(f'@{self.user.display_name}', '').strip()
-            if not user_prompt:
-                user_prompt = "Hello!"
-
             thread_name = f"Chat with {message.author.display_name}"
-            # Create a thread from the message
             thread = await message.create_thread(name=thread_name, auto_archive_duration=60)
-            
-            async with thread.typing():
-                try:
-                    response = client.models.generate_content(
-                        model=MODEL_ID,
-                        contents=[{"role": "user", "parts": [{"text": user_prompt}]}]
-                    )
-                    await self.send_long_message(thread, response.text)
-                except Exception as e:
-                    await thread.send(f"Error: {e}")
+            await self.process_gemini_request(thread, message)
             return
 
-        # 2. If we are in a thread, respond if we are the thread owner or mentioned
+        # 2. Respond in a thread owned by the bot
         if is_in_thread and (message.channel.owner_id == self.user.id or bot_mentioned):
-            async with message.channel.typing():
-                try:
-                    # Fetch conversation history from the thread
-                    # We limit to last 30 messages to fit context and avoid rate limits
-                    history = []
-                    async for msg in message.channel.history(limit=30, oldest_first=True):
-                        if not msg.clean_content and not msg.attachments:
-                            continue
-                            
-                        # Determine role: "model" for bot, "user" for anyone else
-                        role = "model" if msg.author == self.user else "user"
-                        
-                        text = msg.clean_content
-                        # If it's a user message, prefix their name if multiple people talk
-                        if role == "user":
-                            text = f"{msg.author.display_name}: {text}"
-                            
-                        history.append({"role": role, "parts": [{"text": text}]})
+            await self.process_gemini_request(message.channel, message)
+
+    async def process_gemini_request(self, channel, trigger_message):
+        """Main loop for generating content, handling attachments and tool calls."""
+        # Initial status: reaction
+        try:
+            await trigger_message.add_reaction("⏳")
+        except discord.Forbidden:
+            pass # No permissions for reactions
+
+        async with channel.typing():
+            try:
+                # Fetch history from the channel (Thread)
+                history = []
+                async for msg in channel.history(limit=30, oldest_first=True):
+                    role = "model" if msg.author == self.user else "user"
+                    parts = []
                     
-                    if not history:
-                        return
-                        
+                    # 1. Process Text
+                    clean_text = msg.clean_content.replace(f'@{self.user.display_name}', '').strip()
+                    if clean_text:
+                        # Prefix user name for multi-user context
+                        text_payload = f"{msg.author.display_name}: {clean_text}" if role == "user" else clean_text
+                        parts.append({"text": text_payload})
+                    
+                    # 2. Process Attachments (only images or text for now)
+                    for att in msg.attachments:
+                        mime_type = att.content_type or mimetypes.guess_type(att.url)[0]
+                        if mime_type and (mime_type.startswith("image/") or mime_type.startswith("text/")):
+                            # Download content
+                            data = await att.read()
+                            parts.append({"inline_data": {"data": data, "mime_type": mime_type}})
+                    
+                    if parts:
+                        history.append({"role": role, "parts": parts})
+
+                if not history:
+                    return
+
+                # Multi-turn generation with tool handling
+                response = client.models.generate_content(
+                    model=MODEL_ID,
+                    contents=history,
+                    config=types.GenerateContentConfig(tools=[{"function_declarations": TOOL_DECLARATIONS}])
+                )
+
+                # Recursive tool handling loop
+                while response.candidates[0].content.parts[0].function_call:
+                    tool_call = response.candidates[0].content.parts[0].function_call
+                    tool_name = tool_call.name
+                    tool_args = tool_call.args
+                    
+                    # Execute tool
+                    if tool_name in TOOLS:
+                        result = TOOLS[tool_name](**tool_args)
+                    else:
+                        result = f"Error: Tool '{tool_name}' not found."
+                    
+                    # Log for debugging
+                    print(f"Executing tool {tool_name} with args {tool_args} -> Result: {str(result)[:50]}...")
+
+                    # Feed result back to Gemini
+                    history.append(response.candidates[0].content) # Model's call
+                    history.append({
+                        "role": "user",
+                        "parts": [{"function_response": {"name": tool_name, "response": {"result": str(result)}}}]
+                    })
+                    
                     response = client.models.generate_content(
                         model=MODEL_ID,
-                        contents=history
+                        contents=history,
+                        config=types.GenerateContentConfig(tools=[{"function_declarations": TOOL_DECLARATIONS}])
                     )
-                    
-                    await self.send_long_message(message.channel, response.text)
-                except Exception as e:
-                    await message.reply(f"Error: {e}")
+
+                # Final response delivery
+                final_text = response.text
+                await self.send_long_message(channel, final_text)
+                
+                # Update reactions
+                try:
+                    await trigger_message.remove_reaction("⏳", self.user)
+                    await trigger_message.add_reaction("✅")
+                except discord.Forbidden:
+                    pass
+
+            except Exception as e:
+                print(f"Gemini Processing Error: {e}")
+                try:
+                    await trigger_message.remove_reaction("⏳", self.user)
+                    await trigger_message.add_reaction("❌")
+                    await channel.send(f"⚠️ Error: {str(e)}")
+                except discord.Forbidden:
+                    await channel.send(f"⚠️ Error: {str(e)}")
 
     async def send_long_message(self, channel, text):
-        """Splits long messages to comply with Discord's 2000 character limit."""
+        """Splits long messages by Discord's 2000 character limit."""
+        if not text:
+            return
         if len(text) <= 2000:
             await channel.send(text)
             return
 
-        # Simple chunking by character limit
         chunks = [text[i:i+1990] for i in range(0, len(text), 1990)]
         for chunk in chunks:
             await channel.send(chunk)
