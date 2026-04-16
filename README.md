@@ -1,6 +1,8 @@
-# Gemma
+# gem-discord-bot
 
 A standalone Discord bot backed by Google's Gemini. Runs as a Bun process on fragserv, responds to allowlisted messages, supports image input, and can react with emoji.
+
+The bot's in-Discord persona is "Gemma" — the repo name was simplified from `gemini-discord-mcp` to `gem-discord-bot` once the MCP approach was abandoned.
 
 ## Why not MCP?
 
@@ -144,7 +146,7 @@ Gemma runs as a systemd user service. Unit file at `~/.config/systemd/user/gemma
 ```bash
 # Deploy update
 git push origin main
-ssh baila@fragserv 'wsl -u jbai -e bash -lc "cd ~/repos/gemini-discord-mcp && git pull"'
+ssh baila@fragserv 'wsl -u jbai -e bash -lc "cd ~/repos/gem-discord-bot && git pull"'
 ssh baila@fragserv 'wsl -u jbai -e bash -lc "systemctl --user restart gemma"'
 
 # Check status
