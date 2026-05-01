@@ -1,68 +1,88 @@
 # gem-discord-bot
 
-A standalone Discord bot backed by Google's Gemini 2.0. Runs as a Node.js/`tsx` process, responds to allowlisted messages, supports multimodal input (images, video, audio, documents), uses native Gemini tools (Google Search, Code Execution), and can react with emoji.
+A standalone Discord bot backed by Google's Gemini 3. Runs as a Node.js/`tsx` process, responds to allowlisted users in allowlisted channels, supports multimodal input (images, video, audio, documents, YouTube), uses native Gemini tools (Google Search, Code Execution) plus a registry of user-defined function tools (`fetch_url`, `search_memory`, IBKR live data, etc.), and reacts with emoji.
 
-The bot's in-Discord persona is "Gemma" — the repo name was simplified from `gemini-discord-mcp` to `gem-discord-bot` once the MCP approach was abandoned.
+The bot's in-Discord persona is **"Gemma"** — the repo name was simplified from `gemini-discord-mcp` to `gem-discord-bot` once the MCP approach was abandoned.
 
 ## Why not MCP?
 
-An earlier version of this repo tried to be a Gemini-CLI MCP plugin. It didn't work: Gemini CLI has no push-event ingestion pathway, so there was no way for Discord messages to reach the model unprompted. Rebuilt as a standalone daemon instead.
+An earlier version tried to be a Gemini-CLI MCP plugin. It didn't work: Gemini CLI has no push-event ingestion pathway, so there was no way for Discord messages to reach the model unprompted. Rebuilt as a standalone daemon instead.
 
 ## Stack
 
-- TypeScript + Node.js (via `tsx`)
+- TypeScript + Node.js 22 (via `tsx`)
 - `discord.js` v14
-- `@google/generative-ai` (Gemini 2.0 Flash by default; override with `GEMINI_MODEL`)
+- `@google/generative-ai` (Gemini 3 Flash by default; override with `GEMINI_MODEL`)
 
 ---
 
 ## Features
 
 ### Intelligence & Tools
-- **Native Tool Use:** Automatically uses Google Search and Code Execution when appropriate.
-- **Chain-of-Thought (CoT):** Displays a `💭 **Thinking:**` blockquote when reasoning through complex prompts before delivering the final answer.
 
-### Messaging & UX
-- **Heartbeat Typing:** Discord's typing indicator is maintained recursively until Gemini finishes processing, preventing timeout drop-offs during long tool-use or CoT generations.
-- **Smart Chunking:** Splits long responses into ≤2000-char chunks. Syntax-aware splitting preserves markdown code block formatting (`` ``` ``) across message boundaries.
-- **Context Window:** Fetches the last 20 messages of channel history as conversation context.
-- **Emoji Reactions:** Can react to a message with an emoji based on context.
+- **Built-in tools:** `googleSearch` and `codeExecution` are server-side, fired automatically when the model decides to. The bot drops `codeExecution` from the tool list when the request payload contains audio or video — Gemini's codeExecution mime allowlist is stricter than the model's video-understanding allowlist, and `.mov` / `.mp4` files with embedded timed-text tracks 400 the entire request otherwise.
+- **Function-call registry:** Models can call `fetch_url` (with SSRF guard), `search_memory` (semantic recall, see below), and any registered IBKR / utility tools. Each call is wrapped with timing + result-preview capture for the verbose surface.
+- **Tool-call loop** capped at 3 iterations to bound runaway cost.
+- **Streaming with edit-flushing:** long responses stream into Discord via `message.edit()` as tokens arrive, then the streaming messages are edited in place to become the final output (zero-duplicate guarantee on chunk-count changes).
 
-### Multimodal Ingestion (Parallelized & Cached)
-- **Images** (PNG, JPEG, WebP, GIF, HEIC) & **Documents** (PDF, TXT, HTML, JS/TS): processed inline via base64.
-- **Video + Audio**: Uploaded via the Gemini File API.
-- **Parallel Processing:** Multiple attachments are processed concurrently via `Promise.allSettled` for maximum speed.
-- **URI Caching:** Discord media URLs are cached to Gemini `fileUri`s, preventing redundant uploads and allowing the bot to "remember" images from earlier in the conversation history.
+### "Show your work" surface (per-channel `verbose` / `showCode` flags)
+
+When enabled per channel via slash commands:
+
+- **🔍 Web search** — bulleted list of the queries Gemma actually typed into Google
+- **🛠️ Tool calls** — `tool(args) [142ms] ↳ result preview` per registry dispatch
+- **🛠️ Code (python)** — code-execution artifacts with output, deduped against prose-side fenced blocks the model paraphrases
+- **🧠 Reasoning** — gemini-3 native thought-summary parts (`thought: true`), distinct from the JSON-wrapper `thinking` field
+- **💭 Thinking** — Chain-of-thought scratchpad from the JSON wrapper (per-channel always/auto/never)
+- **Token + time footer** — `` ` ↑ 14,200 · ↓ 310 · » 4.2s ` `` on every reply when verbose is on
+
+### Reliability fences
+
+- Catches `@google/generative-ai` 0.21–0.24 SDK's "Failed to parse stream" bug and falls back to non-streaming for that turn.
+- Catches Gemini 400s as a typed `GeminiRequestRejected` exception with the rejection reason extracted, so unhandled rejections never kill the message handler.
+- Sanitizes `fileData` mime types against an allowlist when resurrecting attachments from history cache (rejects bogus sub-track mimes).
+- `maxOutputTokens=4096` cap to bound any future degenerate-generation loop blast radius (we hit one in April with `gemini-3-flash-preview` emitting `5v57_5v57_…` to max output).
+- React-emoji fallback (`👀`) when the model omits the field or returns an unsupported emoji.
+
+### Multimodal Ingestion (parallel + cached)
+
+- **Images** (PNG, JPEG, WebP, GIF, HEIC) & **Documents** (PDF, TXT, HTML, JS/TS): inlined as base64.
+- **Video + Audio** (mp4, mov→quicktime, mpeg, webm, wav, mp3, flac, etc.): uploaded via the Gemini File API. Mime types validated against the allowlist before upload.
+- **YouTube URLs** in the message body: fetched via `yt-dlp` for auto-subs, ingested as text.
+- **Parallel processing:** `Promise.allSettled` on attachment + YouTube workers.
+- **URI cache:** Discord media URLs cached to Gemini `fileUri`s, so the model can "remember" media from earlier in the conversation without re-uploading.
 
 ### Semantic Memory (RAG)
-- **Background Ingestion:** Messages from allowed users in allowed channels are embedded (Gemini `text-embedding-004`) and stored in a local SQLite database with the [`sqlite-vss`](https://github.com/asg017/sqlite-vss) vector extension.
-- **Retrieval Tool:** The model can call a `search_memory` tool loop mid-generation to pull semantically-relevant past messages for the current channel. Useful for "what did Dan say about X last month?"-style recall across months of conversation.
-- **Backfill:** `/gemini backfill` embeds recent history from a channel on demand — useful after deploying to a pre-existing channel.
 
-### Real-Time Token Streaming
-- **Incremental editing:** Long responses stream into Discord via message editing as tokens arrive, giving a ChatGPT-like typing experience instead of wait-and-chunk.
+- **Background ingestion:** messages from allowed users in allowed channels are embedded with `gemini-embedding-001` (768-dim) and stored in SQLite + [`sqlite-vss`](https://github.com/asg017/sqlite-vss).
+- **Retrieval tool:** the model can call `search_memory` mid-generation to pull semantically-relevant past messages for the current channel.
+- **Conversation summarization:** background `SummarizationScheduler` rolls up older history into per-channel summaries that get injected into the system prompt — keeps long-running channels from blowing the context window without losing all prior context.
+- **Backfill:** `/gemini backfill #channel [limit]` embeds recent history on demand after deploying to an existing channel.
 
-### Admin Slash Commands
+### Reactions interface
+
+Configured emoji reactions on bot messages trigger ops via `PinnedFactsStore`. Inbound 🛑 reactions (when wired) also short-circuit the next tool call as a stop signal — see the cc-context discord plugin patch.
+
+### Admin slash commands
+
 Manage the bot directly from Discord without touching terminal files. Requires `DISCORD_ADMIN_ID` in `.env` (or Server Admin permissions).
-- `/gemini allow @user`
-- `/gemini revoke @user`
-- `/gemini channel #channel [enabled] [require_mention]`
-- `/gemini persona <filename.md>` (Hot-swaps the active persona)
-- `/gemini backfill #channel [limit]` (Embeds recent channel history into semantic memory)
+
+- `/gemini allow @user` / `/gemini revoke @user`
+- `/gemini channel #channel enabled require_mention [thinking] [show_code] [verbose]` — full per-channel config
+- `/gemini thinking <always|auto|never> [#channel]` — quick toggle for the 💭 block
+- `/gemini showcode <true|false> [#channel]` — quick toggle for code artifacts + tool-call surface + 🔍 web search
+- `/gemini verbose <true|false> [#channel]` — quick toggle for token footer + 🧠 reasoning
+- `/gemini persona <filename.md>` — hot-swap the active persona
+- `/gemini backfill #channel [limit]` — embed recent history into semantic memory
 
 ### Persona & Shared Context
+
 The system prompt is composed at runtime from:
-1. The active persona file (e.g., `persona.md`) in the state dir.
-2. Shared memory files — any `*.md` under `$SQUAD_CONTEXT_DIR/memories/` (optional).
-3. Per-channel summary — `$SQUAD_CONTEXT_DIR/summaries/<channel_id>.md` (read fresh each turn, optional).
 
----
-
-## Future Roadmap
-- **Proactive Cron Jobs (Autonomy):** Enable Gemma to run scheduled tasks (e.g., pulling data from `ibkr-terminal`) to drop unprompted daily portfolio briefings, risk alerts, or earnings summaries into a dedicated channel.
-- **Agent Handoff & Multi-Agent Debates:** Give Gemma the ability to delegate sub-tasks (triggering `jules-review` on a GitHub link) or spawn secondary model instances to debate complex topics (e.g., generating a bull case, then calling a bear-case agent to argue against it).
-- **Token-Aware Context Windowing:** Replace the hardcoded 20-message limit with a dynamic token counter to maximize context efficiency without hitting API limits.
-- **Voice Channel Intake:** Enable the bot to join Discord Voice Channels and transcribe/process audio streams natively using Gemini's multimodal capabilities.
+1. The active persona file (`persona.md` by default) in the state dir.
+2. Pinned facts from `pinned-facts.md`.
+3. Per-channel conversation summary from `SummaryStore` (refreshed by the background scheduler).
+4. A response-format JSON contract (instructs the model to emit `{react, thinking, reply}` since responseSchema is incompatible with built-in tools).
 
 ---
 
@@ -70,12 +90,15 @@ The system prompt is composed at runtime from:
 
 All runtime state lives in `~/.gemini/channels/discord/` (override via `DISCORD_STATE_DIR`):
 
-| File | Purpose |
+| File / dir | Purpose |
 |---|---|
-| `.env` | `DISCORD_BOT_TOKEN`, `GEMINI_API_KEY`, `DISCORD_ADMIN_ID`, optional `GEMINI_MODEL` |
-| `access.json` | User + channel allowlists (Modified via `/gemini` commands) |
+| `.env` | `DISCORD_BOT_TOKEN`, `GEMINI_API_KEY`, `DISCORD_ADMIN_ID`, optional `GEMINI_MODEL`, `MAX_HISTORY_TOKENS`, `MAX_UNSUMMARIZED_MESSAGES`, `SUMMARIZATION_BATCH_LIMIT` |
+| `access.json` | User + channel allowlists with per-channel render flags |
 | `memory.db` | SQLite + sqlite-vss database of embedded messages for semantic recall |
-| `persona.md` | Default System prompt |
+| `persona.md` | Default system prompt |
+| `pinned-facts.md` | Persistent facts injected into the prompt every turn |
+| `gemma.log` | Service log (info + errors) |
+| `summaries.json` | Per-channel rolled-up summaries from `SummarizationScheduler` |
 | `inbox/` | Per-message attachment scratch dir (auto-cleaned after each turn) |
 
 ### access.json format
@@ -86,13 +109,39 @@ All runtime state lives in `~/.gemini/channels/discord/` (override via `DISCORD_
     "<discord_user_id>": { "allowed": true }
   },
   "channels": {
-    "<channel_id>": { "enabled": true, "requireMention": true }
+    "<channel_id>": {
+      "enabled": true,
+      "requireMention": true,
+      "thinking": "auto",
+      "showCode": false,
+      "verbose": false
+    }
   }
 }
 ```
 
 - Unknown users or channels are silently ignored — explicit allowlist only.
-- Can be modified securely via the `/gemini` Discord slash commands.
+- `thinking`: `"always"` | `"auto"` | `"never"` (default `"auto"`)
+- `showCode`: render code-execution artifacts + tool calls + web-search queries (default `false`)
+- `verbose`: render the token/time footer + native reasoning block (default `false`)
+- All flags are modifiable via `/gemini` slash commands.
+
+---
+
+## Deploy
+
+Runs on fragserv (WSL) as a systemd user service (`gemma.service`). Node 22 via nvm.
+
+```bash
+# Local edit, push, redeploy:
+git push origin main
+ssh baila@fragserv 'wsl -u jbai -e bash -lc ". /home/jbai/.nvm/nvm.sh && cd ~/repos/gem-discord-bot && git pull && npm install && systemctl --user restart gemma"'
+
+# Hot reload (access.json + persona.md only, no code reload):
+ssh baila@fragserv 'wsl -u jbai -e bash -lc "systemctl --user kill -s HUP gemma"'
+```
+
+Logs: `~/.gemini/channels/discord/gemma.log`. Service tail: `systemctl --user status gemma`.
 
 ---
 
@@ -100,7 +149,7 @@ All runtime state lives in `~/.gemini/channels/discord/` (override via `DISCORD_
 
 ### Prerequisites
 
-- Node.js (v20+)
+- Node.js v22+
 - A Discord bot application with:
   - **Message Content Intent** enabled (Bot → Privileged Gateway Intents)
   - Permissions: View Channels, Send Messages, Send Messages in Threads, Read Message History, Add Reactions, Attach Files
@@ -117,23 +166,33 @@ cat > ~/.gemini/channels/discord/.env <<EOF
 DISCORD_BOT_TOKEN=your_token_here
 GEMINI_API_KEY=your_key_here
 DISCORD_ADMIN_ID=your_personal_discord_user_id
-# GEMINI_MODEL=gemini-2.0-flash   # optional override
+GEMINI_MODEL=gemini-3-flash-preview
 EOF
 chmod 600 ~/.gemini/channels/discord/.env
 
-# Optionally create a default access.json, though /gemini commands can handle this later
+# Optional: bootstrap access.json (or use /gemini commands later)
 cat > ~/.gemini/channels/discord/access.json <<EOF
 {
   "users": { "YOUR_DISCORD_USER_ID": { "allowed": true } },
-  "channels": { "YOUR_CHANNEL_ID": { "enabled": true, "requireMention": true } }
+  "channels": {
+    "YOUR_CHANNEL_ID": {
+      "enabled": true,
+      "requireMention": true,
+      "thinking": "auto",
+      "showCode": false,
+      "verbose": false
+    }
+  }
 }
 EOF
 
 npm run start
 ```
 
-Expected output: 
+Expected output:
+
 ```
+◇ injected env (3) from ../../.gemini/channels/discord/.env
 Gemma online as <bot-username>#XXXX (<bot-id>)
 Slash commands registered.
 ```
@@ -146,4 +205,13 @@ Slash commands registered.
 npm run test
 ```
 
-Coverage: access filter, attachment processing, history formatting, Gemini response parsing, persona loading, and chunk splitting.
+Coverage: access manager (allowlist + flags + invariants), gemini client (response parsing, tool extraction, mime sanitization), attachments processing, history formatting + token budgeting, persona loading, chunk splitting, pinned-facts store, summarization scheduler, reactions handler.
+
+---
+
+## Future Roadmap
+
+- **Proactive cron jobs:** scheduled Gemma broadcasts (daily portfolio briefings, risk alerts, earnings summaries) into a dedicated channel.
+- **Multi-agent debates:** delegate sub-tasks (`jules-review` on a GitHub link) or spawn secondary instances to argue both sides of a thesis.
+- **Voice channel intake:** join Discord voice and transcribe/process audio streams natively via Gemini's multimodal stack.
+- **Migration to `@google/genai`:** the legacy `@google/generative-ai` SDK is unmaintained and has known stream-parse bugs we're working around. New SDK is the long-term fix.
