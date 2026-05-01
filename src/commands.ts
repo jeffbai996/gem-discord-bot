@@ -45,6 +45,11 @@ export const geminiCommand = new SlashCommandBuilder()
         .setDescription('Surface usage/finishReason footer (default: false)')
         .setRequired(false)
       )
+      .addBooleanOption(option => option
+        .setName('opt_in_reply')
+        .setDescription('Gate non-addressed messages with a cheap classifier — only reply when actually for Gemma (default: false)')
+        .setRequired(false)
+      )
   )
   .addSubcommand(subcommand =>
     subcommand
@@ -89,6 +94,13 @@ export const geminiCommand = new SlashCommandBuilder()
       .addBooleanOption(option => option.setName('enabled').setDescription('Show verbose footer').setRequired(true))
       .addChannelOption(option => option.setName('channel').setDescription('Channel (defaults to current)').setRequired(false))
   )
+  .addSubcommand(subcommand =>
+    subcommand
+      .setName('optinreply')
+      .setDescription('Quick toggle: gate non-addressed messages with a cheap classifier (defaults to current channel)')
+      .addBooleanOption(option => option.setName('enabled').setDescription('Enable opt-in reply gating').setRequired(true))
+      .addChannelOption(option => option.setName('channel').setDescription('Channel (defaults to current)').setRequired(false))
+  )
 
   export async function executeGeminiCommand(interaction: ChatInputCommandInteraction, access: AccessManager, persona: PersonaLoader, gemini: GeminiClient, adminUserId?: string) {
   // Extra layer of security: only specific user ID from .env can use this, 
@@ -119,9 +131,10 @@ export const geminiCommand = new SlashCommandBuilder()
       const thinking = (interaction.options.getString('thinking') ?? 'auto') as 'always' | 'auto' | 'never'
       const showCode = interaction.options.getBoolean('show_code') ?? false
       const verbose = interaction.options.getBoolean('verbose') ?? false
-      await access.setChannel(channel.id, enabled, requireMention, { thinking, showCode, verbose })
+      const optInReply = interaction.options.getBoolean('opt_in_reply') ?? false
+      await access.setChannel(channel.id, enabled, requireMention, { thinking, showCode, verbose, optInReply })
       return interaction.reply({
-        content: `✅ Channel <#${channel.id}> configured. Enabled: ${enabled}, Require Mention: ${requireMention}, Thinking: ${thinking}, Show Code: ${showCode}, Verbose: ${verbose}.`,
+        content: `✅ Channel <#${channel.id}> configured. Enabled: ${enabled}, Require Mention: ${requireMention}, Thinking: ${thinking}, Show Code: ${showCode}, Verbose: ${verbose}, Opt-In Reply: ${optInReply}.`,
         ephemeral: true
       })
     }
@@ -176,6 +189,23 @@ export const geminiCommand = new SlashCommandBuilder()
         const updated = await access.setChannelFlags(channel.id, { verbose: enabled })
         return interaction.reply({
           content: `✅ <#${channel.id}> verbose → \`${enabled}\` (thinking=${updated.thinking}, showCode=${updated.showCode})`,
+          ephemeral: true
+        })
+      } catch (e: any) {
+        return interaction.reply({ content: `❌ ${e.message}`, ephemeral: true })
+      }
+    }
+
+    if (subcommand === 'optinreply') {
+      const enabled = interaction.options.getBoolean('enabled', true)
+      const channel = interaction.options.getChannel('channel') ?? interaction.channel
+      if (!channel) {
+        return interaction.reply({ content: '❌ No channel resolved (run from inside a channel or pass the channel arg).', ephemeral: true })
+      }
+      try {
+        const updated = await access.setChannelFlags(channel.id, { optInReply: enabled })
+        return interaction.reply({
+          content: `✅ <#${channel.id}> optInReply → \`${enabled}\` — Gemma will gate non-addressed messages with a cheap classifier (thinking=${updated.thinking}, showCode=${updated.showCode}, verbose=${updated.verbose})`,
           ephemeral: true
         })
       } catch (e: any) {

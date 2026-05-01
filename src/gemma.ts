@@ -7,6 +7,7 @@ import { PersonaLoader } from './persona.ts'
 import { buildContextHistory } from './history.ts'
 import { processAttachments, processYouTubeUrls, type InputAttachment } from './attachments.ts'
 import { GeminiClient, stripDuplicateCodeBlocks, GeminiRequestRejected } from './gemini.ts'
+import { shouldReply } from './gate.ts'
 import { chunk } from './chunk.ts'
 import { geminiCommand, executeGeminiCommand } from './commands.ts'
 import { insertMessage } from './db.ts'
@@ -191,6 +192,22 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
   }
 
   if (!gate) return
+
+  // Reply gate (opt-in per channel). Skip for explicit regenerate / expand
+  // ops — those are user-initiated, never silenced. tier 0 returns instantly
+  // for @mention or reply-to-Gemma; tier 2 calls flash-lite (~200ms, ~$0.00001)
+  // for ambiguous cases. Fail-open so a gate fault never silences gemma
+  // entirely. See gate.ts for design notes.
+  const channelOptInReply = access.channelFlags(message.channelId).optInReply
+  if (channelOptInReply && !opts.editTarget && !opts.expansion) {
+    const gateResult = await shouldReply({
+      message,
+      botUserId: client.user.id,
+      apiKey: GEMINI_API_KEY!
+    })
+    console.log(`[gate] ${message.channelId} ${message.id} → ${gateResult.decision} (tier=${gateResult.tier} reason=${gateResult.reason} ${gateResult.latencyMs}ms)`)
+    if (gateResult.decision === 'NO') return
+  }
 
   let typingInterval: ReturnType<typeof setInterval> | null = null
   let streamInterval: ReturnType<typeof setInterval> | null = null

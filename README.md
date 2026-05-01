@@ -68,10 +68,11 @@ Configured emoji reactions on bot messages trigger ops via `PinnedFactsStore`. I
 Manage the bot directly from Discord without touching terminal files. Requires `DISCORD_ADMIN_ID` in `.env` (or Server Admin permissions).
 
 - `/gemini allow @user` / `/gemini revoke @user`
-- `/gemini channel #channel enabled require_mention [thinking] [show_code] [verbose]` — full per-channel config
+- `/gemini channel #channel enabled require_mention [thinking] [show_code] [verbose] [opt_in_reply]` — full per-channel config
 - `/gemini thinking <always|auto|never> [#channel]` — quick toggle for the 💭 block
 - `/gemini showcode <true|false> [#channel]` — quick toggle for code artifacts + tool-call surface + 🔍 web search
 - `/gemini verbose <true|false> [#channel]` — quick toggle for token footer + 🧠 reasoning
+- `/gemini optinreply <true|false> [#channel]` — quick toggle for the reply gate (when on, Gemma stays silent on messages not addressed to her)
 - `/gemini persona <filename.md>` — hot-swap the active persona
 - `/gemini backfill #channel [limit]` — embed recent history into semantic memory
 
@@ -114,7 +115,8 @@ All runtime state lives in `~/.gemini/channels/discord/` (override via `DISCORD_
       "requireMention": true,
       "thinking": "auto",
       "showCode": false,
-      "verbose": false
+      "verbose": false,
+      "optInReply": false
     }
   }
 }
@@ -124,6 +126,7 @@ All runtime state lives in `~/.gemini/channels/discord/` (override via `DISCORD_
 - `thinking`: `"always"` | `"auto"` | `"never"` (default `"auto"`)
 - `showCode`: render code-execution artifacts + tool calls + web-search queries (default `false`)
 - `verbose`: render the token/time footer + native reasoning block (default `false`)
+- `optInReply`: when `true`, Gemma runs a cheap two-tier gate (regex → flash-lite classifier) on every inbound message and stays silent unless the gate decides she's the intended addressee. Useful for high-traffic channels where she shouldn't reply to every line. Default `false` (always engages). When this flag is on and the message isn't for her, no LLM call happens and no `💭 *Thinking...*` placeholder posts. (default `false`)
 - All flags are modifiable via `/gemini` slash commands.
 
 ---

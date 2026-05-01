@@ -10,12 +10,14 @@ export interface ChannelConfig {
   thinking?: ThinkingMode  // default "auto" — Gemma decides per message
   showCode?: boolean       // default false — don't render code-exec artifacts
   verbose?: boolean        // default false — surface usage/finishReason footer
+  optInReply?: boolean     // default false — when true, gate non-addressed messages with a cheap classifier instead of always replying
 }
 
 export interface ChannelFlags {
   thinking: ThinkingMode
   showCode: boolean
   verbose: boolean
+  optInReply: boolean
 }
 
 export interface AccessFile {
@@ -111,7 +113,8 @@ export class AccessManager {
       requireMention,
       thinking: flags?.thinking ?? 'auto',
       showCode: flags?.showCode ?? false,
-      verbose: flags?.verbose ?? false
+      verbose: flags?.verbose ?? false,
+      optInReply: flags?.optInReply ?? false
     }
     await this.save()
   }
@@ -133,7 +136,8 @@ export class AccessManager {
       ...existing,
       ...(patch.thinking !== undefined ? { thinking: patch.thinking } : {}),
       ...(patch.showCode !== undefined ? { showCode: patch.showCode } : {}),
-      ...(patch.verbose !== undefined ? { verbose: patch.verbose } : {})
+      ...(patch.verbose !== undefined ? { verbose: patch.verbose } : {}),
+      ...(patch.optInReply !== undefined ? { optInReply: patch.optInReply } : {})
     }
     await this.save()
     return this.data.channels[channelId]
@@ -146,7 +150,8 @@ export class AccessManager {
     return {
       thinking: channel?.thinking ?? 'auto',
       showCode: channel?.showCode ?? false,
-      verbose: channel?.verbose ?? false
+      verbose: channel?.verbose ?? false,
+      optInReply: channel?.optInReply ?? false
     }
   }
 }
