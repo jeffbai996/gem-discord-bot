@@ -59,6 +59,46 @@ function describeAttachment(att: HistoryAttachment): string {
   return `[previous ${kind}: ${att.name}]`
 }
 
+// Strip metadata lines we add to bot replies (token footer, source links,
+// max-token warnings, search-query block, native reasoning, etc.) before
+// feeding the bot's own past messages back into context. Without this, the
+// model pattern-matches its own footer format and starts hallucinating
+// `↑ X · ↓ Y · » Zs` lines inside its reply text — which then get appended
+// alongside the real footer that gemma.ts adds, producing duplicates.
+//
+// Discord's `-# ` directive is reserved for our metadata in this bot, so any
+// line starting with that prefix is safe to drop. Also drop the `🧠 Reasoning`
+// and `🔍 Web search` blocks since those are renderer output, not the model's
+// authored content. The "💭 Thinking:" block IS authored (parsed.thinking) so
+// we keep it.
+export function stripBotMetadata(text: string): string {
+  if (!text) return text
+  const lines = text.split('\n')
+  const out: string[] = []
+  let inMetadataBlock = false
+  for (const line of lines) {
+    if (line.startsWith('-# ')) {
+      inMetadataBlock = false
+      continue  // drop small-text directive lines (footer, sources, warnings)
+    }
+    if (line.startsWith('🧠 **Reasoning:**') || line.startsWith('🔍 **Web search**')) {
+      inMetadataBlock = true
+      continue
+    }
+    if (inMetadataBlock) {
+      // Continuation lines of a metadata block are blockquoted (`> ...`) or
+      // indented bullets (`> · ...`). End the block on the first blank line.
+      if (line.trim() === '') {
+        inMetadataBlock = false
+      }
+      continue
+    }
+    out.push(line)
+  }
+  // Collapse trailing blank lines that the strip leaves behind.
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd()
+}
+
 export function formatHistory(messages: HistoryMessage[], selfId: string): GeminiContent[] {
   return messages.map(m => {
     const isSelf = m.authorId === selfId
@@ -82,7 +122,11 @@ export function formatHistory(messages: HistoryMessage[], selfId: string): Gemin
     const attachmentText = unCachedAttachments.map(describeAttachment).join(' ')
     let text: string
     if (isSelf) {
-      text = [m.content, attachmentText].filter(Boolean).join(' ')
+      // Strip footer/sources/reasoning/web-search blocks from our own past
+      // replies so the model doesn't pattern-match and re-emit them. See
+      // stripBotMetadata for what gets dropped and why.
+      const cleanedContent = stripBotMetadata(m.content)
+      text = [cleanedContent, attachmentText].filter(Boolean).join(' ')
     } else {
       const body = [m.content, attachmentText].filter(Boolean).join(' ')
       text = `${m.authorName}: ${body}`

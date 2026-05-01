@@ -4,7 +4,7 @@ import os from 'os'
 import dotenv from 'dotenv'
 import { AccessManager } from './access.ts'
 import { PersonaLoader } from './persona.ts'
-import { buildContextHistory } from './history.ts'
+import { buildContextHistory, stripBotMetadata } from './history.ts'
 import { processAttachments, processYouTubeUrls, type InputAttachment } from './attachments.ts'
 import { GeminiClient, stripDuplicateCodeBlocks, GeminiRequestRejected } from './gemini.ts'
 import { shouldReply } from './gate.ts'
@@ -417,8 +417,12 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
     // Strip prose-side fenced code blocks that duplicate an artifact we already
     // rendered above. gemini-3-pro-preview repeats executed code in its reply
     // text; the artifact block is the canonical render.
+    // Strip any token-footer / sources / metadata pattern the model might
+    // hallucinate inside its own reply text (it learns the pattern from past
+    // turns where the bot stamped footers; with stripBotMetadata in
+    // history.ts the input is now clean, but belt-and-suspenders.)
     const replyText = parsed.reply
-      ? (flags.showCode ? stripDuplicateCodeBlocks(parsed.reply, meta.codeArtifacts) : parsed.reply)
+      ? stripBotMetadata(flags.showCode ? stripDuplicateCodeBlocks(parsed.reply, meta.codeArtifacts) : parsed.reply)
       : null
     if (replyText) {
       finalFullReply += replyText
