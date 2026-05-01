@@ -47,7 +47,7 @@ export const geminiCommand = new SlashCommandBuilder()
       )
       .addBooleanOption(option => option
         .setName('opt_in_reply')
-        .setDescription('Gate non-addressed messages with a cheap classifier — only reply when actually for Gemma (default: false)')
+        .setDescription('Gate non-addressed messages — only reply when actually for Gemma (default: false)')
         .setRequired(false)
       )
   )
@@ -97,7 +97,7 @@ export const geminiCommand = new SlashCommandBuilder()
   .addSubcommand(subcommand =>
     subcommand
       .setName('optinreply')
-      .setDescription('Quick toggle: gate non-addressed messages with a cheap classifier (defaults to current channel)')
+      .setDescription('Quick toggle: gate non-addressed messages (defaults to current channel)')
       .addBooleanOption(option => option.setName('enabled').setDescription('Enable opt-in reply gating').setRequired(true))
       .addChannelOption(option => option.setName('channel').setDescription('Channel (defaults to current)').setRequired(false))
   )
