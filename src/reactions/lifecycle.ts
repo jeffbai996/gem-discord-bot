@@ -18,6 +18,11 @@ export const EMOJI = {
   replied:     '✅',
   errored:     '❌',
   denied:      '⚠️',
+  // `silenced` is a virtual state — no emoji emitted. Used when Gemma's
+  // model decides to stay silent (both reply and react null). Strips all
+  // transients so the message looks untouched, matching the way Claude
+  // bots opt out (just don't call the reply tool).
+  silenced:    '',
 } as const
 
 export type LifecycleState = keyof typeof EMOJI
@@ -33,6 +38,7 @@ const PREDECESSORS: Record<LifecycleState, LifecycleState[]> = {
   replied:     ALL_TRANSIENTS,
   errored:     ALL_TRANSIENTS,
   denied:      ALL_TRANSIENTS,
+  silenced:    ALL_TRANSIENTS,
 }
 
 /**
@@ -51,13 +57,17 @@ export async function applyLifecycle(message: Message, state: LifecycleState): P
   if (me) {
     for (const prev of PREDECESSORS[state]) {
       const prevEmoji = EMOJI[prev]
-      if (prevEmoji === emoji) continue
+      if (!prevEmoji || prevEmoji === emoji) continue
       const r = message.reactions.cache.get(prevEmoji)
       if (r) {
         await r.users.remove(me.id).catch(() => { /* fire-and-forget */ })
       }
     }
   }
+
+  // `silenced` and any future virtual states use empty emoji — strip
+  // transients (above) but emit nothing.
+  if (!emoji) return
 
   await message.react(emoji).catch(e => {
     console.error(`[lifecycle] react ${emoji} (${state}) failed:`, e)

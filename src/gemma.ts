@@ -359,6 +359,38 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
     // value is now ignored — keep parsing it so older persona prompts
     // don't crash, but don't act on it.
 
+    // Silent-exit path. When the model returns a fully-empty response —
+    // no reply, no thinking, no native thoughts, no tool output we'd want
+    // to surface — the persona has chosen to stay quiet. Match the way
+    // Claude bots opt out (just don't post anything): delete the streaming
+    // placeholder, strip transient lifecycle reactions, leave nothing
+    // behind on either side. Without this the harness was forcing an
+    // "(Empty response)" message + ✅ on every silent turn.
+    const hasNothingToShow = !parsed.reply
+      && !parsed.thinking
+      && !meta.nativeThoughts
+      && meta.toolCalls.length === 0
+      && meta.codeArtifacts.length === 0
+      && meta.searchQueries.length === 0
+      && meta.finishReason !== 'MAX_TOKENS'
+      && meta.finishReason !== 'SAFETY'
+    if (hasNothingToShow) {
+      console.error(`[silent] channel=${message.channelId} message=${message.id} — model returned nothing, exiting clean`)
+      // Strip 👀/🤔/etc without applying any final emoji.
+      applyLifecycle(message, 'silenced').catch(() => {})
+      // Delete the "💭 *Thinking...*" placeholder — no orphan above the silence.
+      for (const m of activeMessages) {
+        await m.delete().catch(err => console.error('silent-exit placeholder delete failed:', err))
+      }
+      activeMessages = []
+      // Cleanup attachments we processed for this turn.
+      await Promise.all([attachmentResult.cleanup(), ytResult.cleanup()])
+      // Still kick the summarizer — silent turns don't change the summary
+      // schedule.
+      summarizer.scheduleIfNeeded(message.channelId)
+      return
+    }
+
     let finalFullReply = ''
 
     // Native thinking summaries from gemini-3 thinking models (parts with
