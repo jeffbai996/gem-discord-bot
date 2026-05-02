@@ -4,7 +4,9 @@
 // pinned facts + tools + toolConfig` server-side via `client.caches.create`.
 // Per-call we pass `cachedContent: name` instead of re-sending the prefix; only
 // the volatile contents (history tail + user message) flow on the wire. Cached
-// input bills at ~25% of normal rate, plus a per-hour storage fee.
+// input bills at ~10% of normal rate (per Gemini pricing for 2.5/3.x
+// models — earlier docs that said 25% were wrong; verified 2026-05-02
+// against the official rate card), plus a per-hour storage fee.
 //
 // Rolling-summary behavior: the persona builder folds the channel's running
 // summary into the system prompt before we see it. When the summarizer rolls

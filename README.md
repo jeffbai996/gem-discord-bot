@@ -46,7 +46,7 @@ When enabled per channel via slash commands:
 
 ### Context caching (per channel, opt-in)
 
-When `cache: true` for a channel, the stable system-prompt prefix (persona + response-format addendum + thinking-mode addendum + **rolling channel summary** + pinned facts + tools + toolConfig) is cached server-side via `client.caches.create`. Per-call, only the volatile parts (recent history tail + the new user message) flow on the wire; the API references the cached prefix by name. Cached input tokens bill at ~25% of the normal rate. Typical hit: ~6,000-token prompt with ~4,000 cached → ~50–70% input-cost reduction.
+When `cache: true` for a channel, the stable system-prompt prefix (persona + response-format addendum + thinking-mode addendum + **rolling channel summary** + pinned facts + tools + toolConfig) is cached server-side via `client.caches.create`. Per-call, only the volatile parts (recent history tail + the new user message) flow on the wire; the API references the cached prefix by name. Cached input tokens bill at **10% of the normal rate** (90% discount; Google's published rate for Gemini 2.5/3.x context caching). Typical hit: ~6,000-token prompt with ~4,000 cached → ~60% input-cost reduction.
 
 The in-process manager keys on `(model, hash(systemText), hash(toolsAndConfig))`. Because the channel summary is part of `systemText`, every summarizer rollup naturally rotates into a fresh cache (old one ages out via TTL — no explicit invalidation needed). Different thinking modes also get separate caches; identical persona+summary across two channels collapses into one shared cache.
 
@@ -146,7 +146,7 @@ All runtime state lives in `~/.gemini/channels/discord/` (override via `DISCORD_
 - `thinking`: `"always"` | `"auto"` | `"never"` (default `"auto"`)
 - `showCode`: render code-execution artifacts + tool calls + web-search queries (default `true`)
 - `verbose`: render the token/time footer + native reasoning block (default `true`)
-- `cache`: enable server-side context caching for the stable system-prompt prefix; cached portion bills at ~25% of normal input rate, so an active channel sees ~50–70% input-cost reduction (default `true` — see Context caching above).
+- `cache`: enable server-side context caching for the stable system-prompt prefix; cached portion bills at 10% of normal input rate (90% discount), so an active channel sees ~60% input-cost reduction on the typical prompt mix (default `true` — see Context caching above).
 - `cacheTtlSec`: optional per-channel override of the cache TTL in seconds. `null` (default) means use the manager default (`7200s` / 2h). Set with `/gemini cache ttl`.
 - All flags are modifiable via `/gemini` slash commands.
 

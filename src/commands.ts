@@ -244,7 +244,7 @@ interface ExtraDeps {
             ? `${updated.cacheTtlSec}s override`
             : `${GeminiCacheManager.defaultTtlSec()}s default`
           return interaction.reply({
-            content: `✅ <#${channel.id}> cache → \`${enabled}\` — ${enabled ? `prefix cached server-side (~25% billing on cached portion). TTL: ${ttlNote}.` : 'caching off'}`,
+            content: `✅ <#${channel.id}> cache → \`${enabled}\` — ${enabled ? `prefix cached server-side (~10% billing on cached portion). TTL: ${ttlNote}.` : 'caching off'}`,
             ephemeral: true
           })
         } catch (e: any) {
