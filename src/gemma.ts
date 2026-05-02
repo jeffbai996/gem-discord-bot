@@ -13,7 +13,7 @@ import { geminiCommand, executeGeminiCommand } from './commands.ts'
 import { insertMessage } from './db.ts'
 import { buildDefaultRegistry } from './tools/index.ts'
 import { PendingEditsStore } from './reactions/pending-edits.ts'
-import { isValidOutboundReactEmoji } from './reactions/vocabulary.ts'
+import { applyLifecycle } from './reactions/lifecycle.ts'
 import { PinnedFactsStore } from './pinned-facts.ts'
 import { handleReaction } from './reactions/handler.ts'
 import { SummaryStore } from './summarization/store.ts'
@@ -212,6 +212,11 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
     if (gateResult.decision === 'NO') return
   }
 
+  // Lifecycle: 👀 the moment we commit to handling this message. Matches
+  // the squad's react_hook lifecycle. 🤔 fires before generate, ✅ on
+  // first reply chunk, ❌ on caught error.
+  applyLifecycle(message, 'received').catch(() => {})
+
   let typingInterval: ReturnType<typeof setInterval> | null = null
   let streamInterval: ReturnType<typeof setInterval> | null = null
   // Hoisted out of the try block so the catch path can edit the streaming
@@ -273,6 +278,10 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
       const initialMsg = await message.reply({ content: '💭 *Thinking...*', allowedMentions: { repliedUser: false } }).catch(() => null)
       if (initialMsg) activeMessages.push(initialMsg as Message)
     }
+
+    // Lifecycle: 🤔 once the placeholder is up and we're about to call
+    // Gemini. Cleans up the prior 👀.
+    applyLifecycle(message, 'thinking').catch(() => {})
 
     let isFlushing = false
     const flushStream = async () => {
@@ -354,18 +363,11 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
       console.error(`[safety] channel=${message.channelId} flagged=${JSON.stringify(meta.flaggedSafety)}`)
     }
 
-    // gemini-3-pro-preview frequently omits the `react` field despite the
-    // persona instruction. Default to 👀 to guarantee a reaction.
-    let reactToFire: string | null = null
-    if (parsed.react && isValidOutboundReactEmoji(parsed.react)) {
-      reactToFire = parsed.react
-    } else if (parsed.react) {
-      console.error(`[react skipped] not a valid unicode emoji: ${JSON.stringify(parsed.react)}`)
-      reactToFire = '👀'
-    } else {
-      reactToFire = '👀'
-    }
-    message.react(reactToFire).catch(e => console.error('react failed:', e))
+    // The persona-driven `parsed.react` field used to fire a single LLM-
+    // chosen reaction here. Replaced with the squad lifecycle (👀→🤔→✅)
+    // applied at the corresponding handler points. The `parsed.react`
+    // value is now ignored — keep parsing it so older persona prompts
+    // don't crash, but don't act on it.
 
     let finalFullReply = ''
 
@@ -490,6 +492,11 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
        finalFullReply = '(Empty response)'
     }
 
+    // Lifecycle: ✅ now that we have content to commit. Cleans up 🤔/👀.
+    // Fires before the actual edit since the edit is multi-step and we
+    // want the indicator to flip the moment the bot is "done thinking".
+    applyLifecycle(message, 'replied').catch(() => {})
+
     if (finalFullReply) {
       // Edit streaming preview messages in place to become the final output.
       // The prior approach (delete all streaming messages, then send fresh ones)
@@ -533,6 +540,8 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
 
   } catch (e: any) {
     console.error('message handler error:', e)
+    // Lifecycle: ❌ on caught error. Cleans up 👀/🤔.
+    applyLifecycle(message, 'errored').catch(() => {})
     // Match explicit rate-limit language only. The naive /rate/i matched
     // "generateContent" in every Gemini URL, causing unrelated 400s to look
     // like rate limits. Anchor on word boundaries + the actual phrase.
