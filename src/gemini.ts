@@ -750,7 +750,20 @@ export class GeminiClient {
       // Record the model's function call, dispatch via the registry with
       // timing + result-preview capture, and feed the result back for the next
       // iteration.
-      activeContents.push({ role: 'model', parts: [{ functionCall: turn.functionCall }] })
+      //
+      // CRITICAL: push the ORIGINAL part from the model's response, not a
+      // reconstructed `{functionCall: ...}`. Gemini-3 thinking models emit a
+      // `thoughtSignature` field alongside the functionCall — when we feed
+      // the function response back in the next iteration, the API requires
+      // that signature to verify the model's CoT lineage. Reconstructing the
+      // part loses the signature and the next call 400s with
+      //   "Function call is missing a thought_signature in functionCall parts"
+      // (seen 2026-05-01 with gemini-3-flash-preview when fetch_url was the
+      // first tool call). The legacy SDK's TS types don't expose
+      // thoughtSignature but the field flows through the raw response.
+      const turnParts = (turn.candidate?.content?.parts as any[] | undefined) ?? []
+      const fnCallPart = turnParts.find(p => p?.functionCall) ?? { functionCall: turn.functionCall }
+      activeContents.push({ role: 'model', parts: [fnCallPart] })
       const fnName = turn.functionCall.name
       const fnArgs = (turn.functionCall.args ?? {}) as Record<string, unknown>
       const t0 = Date.now()

@@ -211,6 +211,11 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
 
   let typingInterval: ReturnType<typeof setInterval> | null = null
   let streamInterval: ReturnType<typeof setInterval> | null = null
+  // Hoisted out of the try block so the catch path can edit the streaming
+  // `💭 Thinking...` placeholder in place rather than leaving it orphaned
+  // alongside a new error reply (seen 2026-05-01: thought_signature crash
+  // left a dangling Thinking... message above the actual error).
+  let activeMessages: Message[] = []
 
   try {
     // Fetch partial DM channels so we can send/read them
@@ -255,7 +260,6 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
 
     let latestParsed = { react: null as string | null, thinking: null as string | null, reply: null as string | null }
     let lastFlushedFullReply = ''
-    let activeMessages: Message[] = []
 
     // Initial loading message. When opts.editTarget is set, reuse that bot
     // message (regenerate / ✏️ flow) instead of sending a new reply.
@@ -538,7 +542,19 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
       msg = "something broke reaching Gemini. check logs."
     }
     try {
-      await message.reply({ content: msg, allowedMentions: { repliedUser: false } })
+      // If a streaming placeholder ("💭 Thinking...") is already up, edit it
+      // in place rather than posting a new error message. Avoids the
+      // orphaned-placeholder UX where the user sees a frozen Thinking line
+      // above the actual error.
+      if (activeMessages.length > 0) {
+        await activeMessages[0].edit(msg).catch(() => {})
+        // Delete any extra streaming chunks beyond the first.
+        for (const extra of activeMessages.slice(1)) {
+          await extra.delete().catch(() => {})
+        }
+      } else {
+        await message.reply({ content: msg, allowedMentions: { repliedUser: false } })
+      }
     } catch { /* nothing to do */ }
   } finally {
     if (typingInterval) clearInterval(typingInterval)
