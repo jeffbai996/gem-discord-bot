@@ -463,7 +463,7 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
       // (~25% of normal) rate. Only renders when a cache hit occurred —
       // u.cachedTokens is 0 on uncached calls.
       const cachedMarker = u && u.cachedTokens > 0
-        ? ` (${formatTokenCount(u.cachedTokens)}↑ cached)`
+        ? ` (${formatTokenCount(u.cachedTokens)} ↑ cached)`
         : ''
       const tokenStr = u
         ? `\` ↑ ${formatTokenCount(u.promptTokens)}${cachedMarker} · ↓ ${formatTokenCount(u.responseTokens)} · » ${respondElapsedSec}s \``

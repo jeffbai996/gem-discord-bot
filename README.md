@@ -50,7 +50,7 @@ When `cache: true` for a channel, the stable system-prompt prefix (persona + res
 
 In-process cache manager keys on `(model, hash(systemText), hash(toolsAndConfig))` — different thinking modes get separate caches, and an MCP-driven tool-list change implicitly creates a new one. TTL defaults to 1 hour. Fail-open semantics: any error during cache create falls back to the uncached path so a transient cache fault never breaks a turn.
 
-Cache marker shows up in the verbose token footer when a hit occurs:  `↑ 3,012 (2,800↑ cached) · ↓ 137 · » 2.4s`.
+Cache marker shows up in the verbose token footer when a hit occurs:  `↑ 3,012 (2,800 ↑ cached) · ↓ 137 · » 2.4s`.
 
 Cache invalidation: `/gemini clear` drops the in-process cache references; persona reload via SIGHUP also implicitly causes new caches to be created (the prefix hash differs).
 
