@@ -15,7 +15,10 @@ import type { Message } from 'discord.js'
 
 // Cheap router model. Using the same env var fallback pattern as the rest of
 // the bot so a single GEMINI_API_KEY covers both the main model and the gate.
-const GATE_MODEL = process.env.GEMMA_GATE_MODEL || 'gemini-2.0-flash-lite'
+// gemini-2.0-flash-lite was deprecated for new users 2026-05; switched to
+// 2.5-flash-lite — still cheap (~$0.075/M input) and instruction-following
+// enough for a binary gate.
+const GATE_MODEL = process.env.GEMMA_GATE_MODEL || 'gemini-2.5-flash-lite'
 const GATE_TIMEOUT_MS = 4000
 
 const GATE_SYSTEM = `You are a reply gate for a Discord bot named Gemma. The bot lives in a multi-bot squad — other bots present include Fraggy, Claudsson, Claudovich, 加班鸭 (jiabanya, "Overtime Duck"), and MacClaude.
