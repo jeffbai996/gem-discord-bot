@@ -328,6 +328,7 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
       channelId: message.channelId,
       thinkingMode: flags.thinking,
       cacheEnabled: flags.cache,
+      cacheTtlSec: flags.cacheTtlSec ?? undefined,
     }, (partial) => {
       latestParsed = partial
     })
@@ -459,14 +460,13 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
       // jammed flush against the closing backtick / "(edited)" badge.
       // » (U+00BB) prefixes the elapsed-time field — clean ASCII glyph,
       // monochrome everywhere, no iOS emoji autopromotion like ⏱ had.
-      // Cache marker shows how much of the prompt was billed at the cached
-      // (~25% of normal) rate. Only renders when a cache hit occurred —
-      // u.cachedTokens is 0 on uncached calls.
-      const cachedMarker = u && u.cachedTokens > 0
-        ? ` (${formatTokenCount(u.cachedTokens)} ↑ cached)`
-        : ''
+      // Per-message footer is intentionally cache-agnostic — cache details
+      // (size, hit count, age, TTL remaining) live behind /gemini cache info
+      // so we don't pollute every reply with bookkeeping the user only checks
+      // occasionally. Cache hits are still observed via lower bills, just not
+      // surfaced inline.
       const tokenStr = u
-        ? `\` ↑ ${formatTokenCount(u.promptTokens)}${cachedMarker} · ↓ ${formatTokenCount(u.responseTokens)} · » ${respondElapsedSec}s \``
+        ? `\` ↑ ${formatTokenCount(u.promptTokens)} · ↓ ${formatTokenCount(u.responseTokens)} · » ${respondElapsedSec}s \``
         : `\` » ${respondElapsedSec}s — no usage data \``
       const safetyStr = meta.flaggedSafety.length > 0
         ? ` ⚠️ ${meta.flaggedSafety.map(s => `${s.category.replace('HARM_CATEGORY_', '')}=${s.probability}`).join(',')}`

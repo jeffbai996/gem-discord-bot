@@ -12,6 +12,7 @@ export interface ChannelConfig {
   verbose?: boolean        // default false — surface usage/finishReason footer
   optInReply?: boolean     // default false — when true, gate non-addressed messages with a cheap classifier instead of always replying
   cache?: boolean          // default false — when true, cache the stable system-prompt prefix server-side for cheaper input billing
+  cacheTtlSec?: number     // optional — override the cache TTL (seconds). Falls back to manager default when unset
 }
 
 export interface ChannelFlags {
@@ -20,6 +21,7 @@ export interface ChannelFlags {
   verbose: boolean
   optInReply: boolean
   cache: boolean
+  cacheTtlSec: number | null
 }
 
 export interface AccessFile {
@@ -117,7 +119,8 @@ export class AccessManager {
       showCode: flags?.showCode ?? false,
       verbose: flags?.verbose ?? false,
       optInReply: flags?.optInReply ?? false,
-      cache: flags?.cache ?? false
+      cache: flags?.cache ?? false,
+      ...(flags?.cacheTtlSec != null ? { cacheTtlSec: flags.cacheTtlSec } : {})
     }
     await this.save()
   }
@@ -141,7 +144,12 @@ export class AccessManager {
       ...(patch.showCode !== undefined ? { showCode: patch.showCode } : {}),
       ...(patch.verbose !== undefined ? { verbose: patch.verbose } : {}),
       ...(patch.optInReply !== undefined ? { optInReply: patch.optInReply } : {}),
-      ...(patch.cache !== undefined ? { cache: patch.cache } : {})
+      ...(patch.cache !== undefined ? { cache: patch.cache } : {}),
+      // null sentinel = clear the override (back to manager default).
+      // Skipping the field entirely means "leave existing override alone".
+      ...(patch.cacheTtlSec === null
+        ? { cacheTtlSec: undefined }
+        : patch.cacheTtlSec !== undefined ? { cacheTtlSec: patch.cacheTtlSec } : {})
     }
     await this.save()
     return this.data.channels[channelId]
@@ -156,7 +164,8 @@ export class AccessManager {
       showCode: channel?.showCode ?? false,
       verbose: channel?.verbose ?? false,
       optInReply: channel?.optInReply ?? false,
-      cache: channel?.cache ?? false
+      cache: channel?.cache ?? false,
+      cacheTtlSec: channel?.cacheTtlSec ?? null
     }
   }
 }

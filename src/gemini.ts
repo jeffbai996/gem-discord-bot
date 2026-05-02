@@ -4,7 +4,7 @@ import type { MediaPart } from './attachments.ts'
 import { isAllowedMime } from './attachments.ts'
 import type { ThinkingMode } from './access.ts'
 import { ToolRegistry } from './tools/registry.ts'
-import { GeminiCacheManager } from './cache.ts'
+import { GeminiCacheManager, type CachedRef } from './cache.ts'
 
 // Thrown when Gemini rejects the request payload itself (HTTP 400). The
 // gemma.ts message handler catches this to surface a specific error to the
@@ -489,6 +489,7 @@ export interface BuildRequestArgs {
   channelId?: string       // Passed so we can execute channel-specific search_memory
   thinkingMode?: ThinkingMode  // default "auto"
   cacheEnabled?: boolean       // default false; opt-in via per-channel flag
+  cacheTtlSec?: number         // override TTL when caching; falls back to manager default
 }
 
 export function buildUserTurn(args: BuildRequestArgs): Content {
@@ -543,6 +544,12 @@ export class GeminiClient {
   // serving stale prefix to a channel that just reset).
   clearCache(): void {
     this.cacheManager.clear()
+  }
+
+  // Read-only handle for slash commands. /gemini cache info introspects
+  // live cache state through here.
+  listCaches(): CachedRef[] {
+    return this.cacheManager.list()
   }
 
   // Tool list. codeExecution is omitted when the request payload contains
@@ -756,6 +763,7 @@ export class GeminiClient {
       const toolConfig = { includeServerSideToolInvocations: true }
       cachedContentName = await this.cacheManager.getOrCreate(
         this.client, this.modelName, systemText, tools, toolConfig,
+        args.cacheTtlSec,
       )
     }
 
@@ -776,10 +784,16 @@ export class GeminiClient {
         finalParsed = parseResponse(turn.text)
         const parts = turn.candidate?.content?.parts as any[] | undefined
         const nt = extractNativeThoughts(parts)
+        const usage = extractUsage(turn.response)
+        // Backfill the actual billed cached-token count so /gemini cache info
+        // shows the API's real measurement instead of our char/4 estimate.
+        if (cachedContentName && usage && usage.cachedTokens > 0) {
+          this.cacheManager.recordCachedTokens(cachedContentName, usage.cachedTokens)
+        }
         meta = {
           groundingSources: extractGroundingSources(turn.candidate),
           codeArtifacts: extractCodeArtifacts(parts),
-          usage: extractUsage(turn.response),
+          usage,
           finishReason: typeof turn.candidate?.finishReason === 'string' ? turn.candidate.finishReason : null,
           flaggedSafety: extractFlaggedSafety(turn.candidate),
           searchQueries: [...searchQueriesAcc],

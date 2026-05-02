@@ -1,6 +1,9 @@
-import { SlashCommandBuilder, PermissionFlagsBits, ChatInputCommandInteraction } from 'discord.js'
+import { SlashCommandBuilder, PermissionFlagsBits, ChatInputCommandInteraction, TextChannel } from 'discord.js'
 import { AccessManager } from './access.ts'
 import { PersonaLoader } from './persona.ts'
+import { GeminiClient } from './gemini.ts'
+import { GeminiCacheManager } from './cache.ts'
+import { insertMessage } from './db.ts'
 
 export const geminiCommand = new SlashCommandBuilder()
   .setName('gemini')
@@ -106,12 +109,34 @@ export const geminiCommand = new SlashCommandBuilder()
       .addBooleanOption(option => option.setName('enabled').setDescription('Enable opt-in reply gating').setRequired(true))
       .addChannelOption(option => option.setName('channel').setDescription('Channel (defaults to current)').setRequired(false))
   )
-  .addSubcommand(subcommand =>
-    subcommand
+  .addSubcommandGroup(group =>
+    group
       .setName('cache')
-      .setDescription('Quick toggle: server-side cache stable system prompt (defaults to current channel)')
-      .addBooleanOption(option => option.setName('enabled').setDescription('Enable context caching').setRequired(true))
-      .addChannelOption(option => option.setName('channel').setDescription('Channel (defaults to current)').setRequired(false))
+      .setDescription('Server-side context caching for the stable system prompt')
+      .addSubcommand(s => s
+        .setName('on')
+        .setDescription('Enable context caching for a channel (defaults to current)')
+        .addChannelOption(o => o.setName('channel').setDescription('Channel (defaults to current)').setRequired(false))
+      )
+      .addSubcommand(s => s
+        .setName('off')
+        .setDescription('Disable context caching for a channel (defaults to current)')
+        .addChannelOption(o => o.setName('channel').setDescription('Channel (defaults to current)').setRequired(false))
+      )
+      .addSubcommand(s => s
+        .setName('info')
+        .setDescription('Show live cache details (size, age, TTL remaining, hits)')
+      )
+      .addSubcommand(s => s
+        .setName('ttl')
+        .setDescription('Override cache TTL for a channel in seconds (60–86400). Pass 0 to reset to default.')
+        .addIntegerOption(o => o.setName('seconds').setDescription('TTL seconds, or 0 to reset').setMinValue(0).setMaxValue(86400).setRequired(true))
+        .addChannelOption(o => o.setName('channel').setDescription('Channel (defaults to current)').setRequired(false))
+      )
+      .addSubcommand(s => s
+        .setName('flush')
+        .setDescription('Drop all in-process cache references — next turn rebuilds')
+      )
   )
   .addSubcommand(subcommand =>
     subcommand
@@ -125,6 +150,18 @@ export const geminiCommand = new SlashCommandBuilder()
       .setDescription('Force a context-summary rollup now, regardless of message threshold')
       .addChannelOption(option => option.setName('channel').setDescription('Channel (defaults to current)').setRequired(false))
   )
+
+// Compact "Xs / Xm Ys / Xh Ym" rendering for the cache info card. Avoids
+// pulling in a date-fns dependency for one display surface.
+function formatRelative(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`
+  const m = Math.floor(seconds / 60)
+  const s = seconds % 60
+  if (m < 60) return s > 0 ? `${m}m ${s}s` : `${m}m`
+  const h = Math.floor(m / 60)
+  const remM = m % 60
+  return remM > 0 ? `${h}h ${remM}m` : `${h}h`
+}
 
 interface ExtraDeps {
   summaryStore: { upsert(channelId: string, summary: string, lastMessageId: string): void }
@@ -243,21 +280,95 @@ interface ExtraDeps {
       }
     }
 
-    if (subcommand === 'cache') {
-      const enabled = interaction.options.getBoolean('enabled', true)
-      const channel = interaction.options.getChannel('channel') ?? interaction.channel
-      if (!channel) {
-        return interaction.reply({ content: '❌ No channel resolved (run from inside a channel or pass the channel arg).', ephemeral: true })
+    // /gemini cache <on|off|info|ttl|flush>. SubcommandGroup means
+    // getSubcommandGroup() returns 'cache' and getSubcommand() returns the
+    // inner verb.
+    if (interaction.options.getSubcommandGroup(false) === 'cache') {
+      const verb = subcommand
+      if (verb === 'on' || verb === 'off') {
+        const enabled = verb === 'on'
+        const channel = interaction.options.getChannel('channel') ?? interaction.channel
+        if (!channel) {
+          return interaction.reply({ content: '❌ No channel resolved (run from inside a channel or pass the channel arg).', ephemeral: true })
+        }
+        try {
+          const updated = await access.setChannelFlags(channel.id, { cache: enabled })
+          const ttlNote = updated.cacheTtlSec != null
+            ? `${updated.cacheTtlSec}s override`
+            : `${GeminiCacheManager.defaultTtlSec()}s default`
+          return interaction.reply({
+            content: `✅ <#${channel.id}> cache → \`${enabled}\` — ${enabled ? `prefix cached server-side (~25% billing on cached portion). TTL: ${ttlNote}.` : 'caching off'}`,
+            ephemeral: true
+          })
+        } catch (e: any) {
+          return interaction.reply({ content: `❌ ${e.message}`, ephemeral: true })
+        }
       }
-      try {
-        const updated = await access.setChannelFlags(channel.id, { cache: enabled })
+
+      if (verb === 'ttl') {
+        const seconds = interaction.options.getInteger('seconds', true)
+        const channel = interaction.options.getChannel('channel') ?? interaction.channel
+        if (!channel) {
+          return interaction.reply({ content: '❌ No channel resolved (run from inside a channel or pass the channel arg).', ephemeral: true })
+        }
+        // 0 = clear override; positive = set. We bypass setChannelFlags's
+        // null-vs-undefined sentinel by routing through it twice if needed,
+        // but the field-clear path (cacheTtlSec: null) handles the 0 case
+        // directly.
+        try {
+          const patch = seconds === 0 ? { cacheTtlSec: null } : { cacheTtlSec: seconds }
+          const updated = await access.setChannelFlags(channel.id, patch as any)
+          const desc = seconds === 0
+            ? `cleared — falls back to default ${GeminiCacheManager.defaultTtlSec()}s`
+            : `${seconds}s override`
+          return interaction.reply({
+            content: `✅ <#${channel.id}> cache TTL → ${desc}. (cache=${updated.cache})`,
+            ephemeral: true
+          })
+        } catch (e: any) {
+          return interaction.reply({ content: `❌ ${e.message}`, ephemeral: true })
+        }
+      }
+
+      if (verb === 'flush') {
+        gemini.clearCache?.()
         return interaction.reply({
-          content: `✅ <#${channel.id}> cache → \`${enabled}\` — ${enabled ? 'stable system prompt prefix will be cached server-side; cached portion bills at ~25%' : 'caching off'} (thinking=${updated.thinking}, showCode=${updated.showCode}, verbose=${updated.verbose}, optInReply=${updated.optInReply})`,
+          content: `🧹 in-process cache references dropped. Next turn rebuilds caches from scratch (server-side caches age out via TTL on Google's side).`,
           ephemeral: true
         })
-      } catch (e: any) {
-        return interaction.reply({ content: `❌ ${e.message}`, ephemeral: true })
       }
+
+      if (verb === 'info') {
+        const caches = gemini.listCaches?.() ?? []
+        if (caches.length === 0) {
+          return interaction.reply({
+            content: `📦 no live caches in process. either no channel has \`cache=true\`, or the prefix is below the model's minimum (1024 Flash / 4096 Pro tokens).\n\ndefault TTL: ${GeminiCacheManager.defaultTtlSec()}s.`,
+            ephemeral: true
+          })
+        }
+        const now = Date.now()
+        const lines: string[] = [`📦 **gemma cache** — ${caches.length} live entr${caches.length === 1 ? 'y' : 'ies'}`, '']
+        for (const c of caches) {
+          const ageSec = Math.floor((now - c.createdAt) / 1000)
+          const idleSec = Math.floor((now - c.lastUsedAt) / 1000)
+          const remainingSec = Math.max(0, c.ttlSec - ageSec)
+          const cachedSize = c.cachedTokens != null
+            ? `${c.cachedTokens.toLocaleString('en-US')} tok billed`
+            : `~${c.systemTokens.toLocaleString('en-US')} tok est. (no hit yet)`
+          lines.push(
+            `• \`${c.systemHash}\` (${c.model})`,
+            `   ↳ size: ${cachedSize}`,
+            `   ↳ hits: ${c.hitCount} · last used: ${formatRelative(idleSec)} ago`,
+            `   ↳ age: ${formatRelative(ageSec)} · TTL: ${c.ttlSec}s · remaining: ${formatRelative(remainingSec)}`,
+            ''
+          )
+        }
+        lines.push(`default TTL: ${GeminiCacheManager.defaultTtlSec()}s. set per-channel with \`/gemini cache ttl\`.`)
+        return interaction.reply({ content: lines.join('\n'), ephemeral: true })
+      }
+
+      // unrecognized verb under the group
+      return interaction.reply({ content: `❌ unknown cache subcommand \`${verb}\``, ephemeral: true })
     }
 
     if (subcommand === 'clear') {

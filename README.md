@@ -46,13 +46,19 @@ When enabled per channel via slash commands:
 
 ### Context caching (per channel, opt-in)
 
-When `cache: true` for a channel, the stable system-prompt prefix (persona + response-format addendum + thinking-mode addendum + tools + toolConfig) is cached server-side via `client.caches.create`. Per-call, only the volatile parts (history + user message + summary) flow on the wire, and the API references the cached prefix by name. Cached input tokens bill at ~25% of the normal rate. Real-world hit on flash-preview: ~3,000-token prompt with ~2,800 cached → ~70% input-cost reduction.
+When `cache: true` for a channel, the stable system-prompt prefix (persona + response-format addendum + thinking-mode addendum + **rolling channel summary** + pinned facts + tools + toolConfig) is cached server-side via `client.caches.create`. Per-call, only the volatile parts (recent history tail + the new user message) flow on the wire; the API references the cached prefix by name. Cached input tokens bill at ~25% of the normal rate. Typical hit: ~6,000-token prompt with ~4,000 cached → ~50–70% input-cost reduction.
 
-In-process cache manager keys on `(model, hash(systemText), hash(toolsAndConfig))` — different thinking modes get separate caches, and an MCP-driven tool-list change implicitly creates a new one. TTL defaults to 1 hour. Fail-open semantics: any error during cache create falls back to the uncached path so a transient cache fault never breaks a turn.
+The in-process manager keys on `(model, hash(systemText), hash(toolsAndConfig))`. Because the channel summary is part of `systemText`, every summarizer rollup naturally rotates into a fresh cache (old one ages out via TTL — no explicit invalidation needed). Different thinking modes also get separate caches; identical persona+summary across two channels collapses into one shared cache.
 
-Cache marker shows up in the verbose token footer when a hit occurs:  `↑ 3,012 (2,800 ↑ cached) · ↓ 137 · » 2.4s`.
+TTL defaults to 2 hours, configurable per channel via `/gemini cache ttl <seconds>` (60–86400). Long evening sessions stay warm; the first message after expiry pays full price.
 
-Cache invalidation: `/gemini clear` drops the in-process cache references; persona reload via SIGHUP also implicitly causes new caches to be created (the prefix hash differs).
+Fail-open: any error during cache create falls back to the uncached path so a transient cache fault never breaks a turn.
+
+#### Inspecting cache state
+
+`/gemini cache info` (ephemeral) shows live in-process caches with size (billed tokens after first hit, or estimated tokens before), age, TTL remaining, hit count, last-used time, and the systemText hash. The per-message verbose footer is intentionally cache-agnostic — bookkeeping that's only checked occasionally lives behind the slash command, not stamped on every reply.
+
+Cache invalidation: `/gemini cache flush` drops all in-process refs; `/gemini clear` also flushes them as part of resetting a channel; persona reload via SIGHUP implicitly rotates caches (the prefix hash differs).
 
 ### Multimodal Ingestion (parallel + cached)
 
@@ -83,8 +89,11 @@ Manage the bot directly from Discord without touching terminal files. Requires `
 - `/gemini showcode <true|false> [#channel]` — quick toggle for code artifacts + tool-call surface + 🔍 web search
 - `/gemini verbose <true|false> [#channel]` — quick toggle for token footer + 🧠 reasoning
 - `/gemini optinreply <true|false> [#channel]` — quick toggle for the reply gate (when on, Gemma stays silent on messages not addressed to her)
-- `/gemini cache <true|false> [#channel]` — quick toggle for server-side caching of the stable system-prompt prefix; ~70% input-cost reduction on a hit (see Context caching below)
-- `/gemini clear [#channel]` — reset Gemma's context for the channel; bumps the history watermark and blanks the rolling summary so the next turn starts fresh
+- `/gemini cache on|off [#channel]` — enable/disable server-side caching of the stable system-prompt prefix (~50–70% input-cost reduction on a hit; see Context caching above)
+- `/gemini cache info` — live cache details: size, hits, age, TTL remaining, hash
+- `/gemini cache ttl <seconds> [#channel]` — override TTL per channel (60–86400; pass `0` to reset to default)
+- `/gemini cache flush` — drop all in-process cache refs (server-side caches age out via TTL)
+- `/gemini clear [#channel]` — reset Gemma's context for the channel; bumps the history watermark, blanks the rolling summary, and flushes the in-process cache so the next turn starts fresh
 - `/gemini compact [#channel]` — force a context-summary rollup right now, regardless of the 50-message default threshold; useful before a long quiet window so the rolling summary is already up-to-date when chat resumes
 - `/gemini persona <filename.md>` — hot-swap the active persona
 - `/gemini backfill #channel [limit]` — embed recent history into semantic memory
@@ -130,7 +139,8 @@ All runtime state lives in `~/.gemini/channels/discord/` (override via `DISCORD_
       "showCode": false,
       "verbose": false,
       "optInReply": false,
-      "cache": false
+      "cache": false,
+      "cacheTtlSec": null
     }
   }
 }
@@ -141,7 +151,8 @@ All runtime state lives in `~/.gemini/channels/discord/` (override via `DISCORD_
 - `showCode`: render code-execution artifacts + tool calls + web-search queries (default `false`)
 - `verbose`: render the token/time footer + native reasoning block (default `false`)
 - `optInReply`: when `true`, Gemma runs a cheap two-tier gate (regex → flash-lite classifier) on every inbound message and stays silent unless the gate decides she's the intended addressee. Useful for high-traffic channels where she shouldn't reply to every line. Default `false` (always engages). When this flag is on and the message isn't for her, no LLM call happens and no `💭 *Thinking...*` placeholder posts. (default `false`)
-- `cache`: enable server-side context caching for the stable system-prompt prefix; cached portion bills at ~25% of normal input rate, so an active channel sees ~70% input-cost reduction (default `false` — see Context caching above).
+- `cache`: enable server-side context caching for the stable system-prompt prefix; cached portion bills at ~25% of normal input rate, so an active channel sees ~50–70% input-cost reduction (default `false` — see Context caching above).
+- `cacheTtlSec`: optional per-channel override of the cache TTL in seconds. `null` (default) means use the manager default (`7200s` / 2h). Set with `/gemini cache ttl`.
 - All flags are modifiable via `/gemini` slash commands.
 
 ---
