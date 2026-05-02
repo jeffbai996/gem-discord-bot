@@ -38,11 +38,21 @@ When enabled per channel via slash commands:
 
 ### Reliability fences
 
-- Catches `@google/generative-ai` 0.21–0.24 SDK's "Failed to parse stream" bug and falls back to non-streaming for that turn.
+- Migrated to `@google/genai` (the maintained SDK) — fixes the legacy SDK's "Failed to parse stream" bug and silent stripping of `thoughtSignature` on response parse (which broke gemini-3 thinking models on tool-loop iteration 2).
 - Catches Gemini 400s as a typed `GeminiRequestRejected` exception with the rejection reason extracted, so unhandled rejections never kill the message handler.
 - Sanitizes `fileData` mime types against an allowlist when resurrecting attachments from history cache (rejects bogus sub-track mimes).
 - `maxOutputTokens=4096` cap to bound any future degenerate-generation loop blast radius (we hit one in April with `gemini-3-flash-preview` emitting `5v57_5v57_…` to max output).
 - React-emoji fallback (`👀`) when the model omits the field or returns an unsupported emoji.
+
+### Context caching (per channel, opt-in)
+
+When `cache: true` for a channel, the stable system-prompt prefix (persona + response-format addendum + thinking-mode addendum + tools + toolConfig) is cached server-side via `client.caches.create`. Per-call, only the volatile parts (history + user message + summary) flow on the wire, and the API references the cached prefix by name. Cached input tokens bill at ~25% of the normal rate. Real-world hit on flash-preview: ~3,000-token prompt with ~2,800 cached → ~70% input-cost reduction.
+
+In-process cache manager keys on `(model, hash(systemText), hash(toolsAndConfig))` — different thinking modes get separate caches, and an MCP-driven tool-list change implicitly creates a new one. TTL defaults to 1 hour. Fail-open semantics: any error during cache create falls back to the uncached path so a transient cache fault never breaks a turn.
+
+Cache marker shows up in the verbose token footer when a hit occurs:  `↑ 3,012 (2,800↑ cached) · ↓ 137 · » 2.4s`.
+
+Cache invalidation: `/gemini clear` drops the in-process cache references; persona reload via SIGHUP also implicitly causes new caches to be created (the prefix hash differs).
 
 ### Multimodal Ingestion (parallel + cached)
 
@@ -68,11 +78,14 @@ Configured emoji reactions on bot messages trigger ops via `PinnedFactsStore`. I
 Manage the bot directly from Discord without touching terminal files. Requires `DISCORD_ADMIN_ID` in `.env` (or Server Admin permissions).
 
 - `/gemini allow @user` / `/gemini revoke @user`
-- `/gemini channel #channel enabled require_mention [thinking] [show_code] [verbose] [opt_in_reply]` — full per-channel config
+- `/gemini channel #channel enabled require_mention [thinking] [show_code] [verbose] [opt_in_reply] [cache]` — full per-channel config
 - `/gemini thinking <always|auto|never> [#channel]` — quick toggle for the 💭 block
 - `/gemini showcode <true|false> [#channel]` — quick toggle for code artifacts + tool-call surface + 🔍 web search
 - `/gemini verbose <true|false> [#channel]` — quick toggle for token footer + 🧠 reasoning
 - `/gemini optinreply <true|false> [#channel]` — quick toggle for the reply gate (when on, Gemma stays silent on messages not addressed to her)
+- `/gemini cache <true|false> [#channel]` — quick toggle for server-side caching of the stable system-prompt prefix; ~70% input-cost reduction on a hit (see Context caching below)
+- `/gemini clear [#channel]` — reset Gemma's context for the channel; bumps the history watermark and blanks the rolling summary so the next turn starts fresh
+- `/gemini compact [#channel]` — force a context-summary rollup right now, regardless of the 50-message default threshold; useful before a long quiet window so the rolling summary is already up-to-date when chat resumes
 - `/gemini persona <filename.md>` — hot-swap the active persona
 - `/gemini backfill #channel [limit]` — embed recent history into semantic memory
 
@@ -116,7 +129,8 @@ All runtime state lives in `~/.gemini/channels/discord/` (override via `DISCORD_
       "thinking": "auto",
       "showCode": false,
       "verbose": false,
-      "optInReply": false
+      "optInReply": false,
+      "cache": false
     }
   }
 }
@@ -127,6 +141,7 @@ All runtime state lives in `~/.gemini/channels/discord/` (override via `DISCORD_
 - `showCode`: render code-execution artifacts + tool calls + web-search queries (default `false`)
 - `verbose`: render the token/time footer + native reasoning block (default `false`)
 - `optInReply`: when `true`, Gemma runs a cheap two-tier gate (regex → flash-lite classifier) on every inbound message and stays silent unless the gate decides she's the intended addressee. Useful for high-traffic channels where she shouldn't reply to every line. Default `false` (always engages). When this flag is on and the message isn't for her, no LLM call happens and no `💭 *Thinking...*` placeholder posts. (default `false`)
+- `cache`: enable server-side context caching for the stable system-prompt prefix; cached portion bills at ~25% of normal input rate, so an active channel sees ~70% input-cost reduction (default `false` — see Context caching above).
 - All flags are modifiable via `/gemini` slash commands.
 
 ---

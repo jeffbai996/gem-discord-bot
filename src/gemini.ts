@@ -4,6 +4,7 @@ import type { MediaPart } from './attachments.ts'
 import { isAllowedMime } from './attachments.ts'
 import type { ThinkingMode } from './access.ts'
 import { ToolRegistry } from './tools/registry.ts'
+import { GeminiCacheManager } from './cache.ts'
 
 // Thrown when Gemini rejects the request payload itself (HTTP 400). The
 // gemma.ts message handler catches this to surface a specific error to the
@@ -267,6 +268,7 @@ export interface UsageMetadata {
   promptTokens: number
   responseTokens: number
   totalTokens: number
+  cachedTokens: number  // 0 when no cache hit; else the prefix size billed at cached rate
 }
 
 export interface FlaggedSafetyRating {
@@ -375,7 +377,8 @@ export function extractUsage(response: any): UsageMetadata | null {
   return {
     promptTokens: u.promptTokenCount ?? 0,
     responseTokens: u.candidatesTokenCount ?? 0,
-    totalTokens: u.totalTokenCount ?? 0
+    totalTokens: u.totalTokenCount ?? 0,
+    cachedTokens: u.cachedContentTokenCount ?? 0,
   }
 }
 
@@ -485,6 +488,7 @@ export interface BuildRequestArgs {
   userName: string
   channelId?: string       // Passed so we can execute channel-specific search_memory
   thinkingMode?: ThinkingMode  // default "auto"
+  cacheEnabled?: boolean       // default false; opt-in via per-channel flag
 }
 
 export function buildUserTurn(args: BuildRequestArgs): Content {
@@ -518,6 +522,7 @@ export class GeminiClient {
   private modelName: string
   private registry: ToolRegistry
   private apiKey: string
+  private cacheManager: GeminiCacheManager
 
   constructor(apiKey: string, modelName: string = 'gemini-2.0-flash', registry: ToolRegistry) {
     this.apiKey = apiKey
@@ -529,6 +534,15 @@ export class GeminiClient {
     // broke gemini-3 thinking models on tool-loop iteration 2 with
     // "Function call is missing a thought_signature" 400s).
     this.client = new GoogleGenAI({ apiKey })
+    this.cacheManager = new GeminiCacheManager()
+  }
+
+  // Wipe in-process cache references. Called when persona reloads (so the
+  // next turn rebuilds against the new persona) or when /gemini clear nukes
+  // a channel's context (cache wasn't channel-specific, but clearing avoids
+  // serving stale prefix to a channel that just reset).
+  clearCache(): void {
+    this.cacheManager.clear()
   }
 
   // Tool list. codeExecution is omitted when the request payload contains
@@ -608,9 +622,23 @@ export class GeminiClient {
   }
 
   // Build the per-call config object common to both streaming and non-streaming.
-  // System prompt + tools + tool_config + maxOutputTokens cap. Caller passes
-  // the dropCodeExec flag based on contentsHaveAudioVideo.
-  private buildCallConfig(systemText: string, dropCodeExec: boolean): any {
+  // When `cachedContentName` is provided, the cached prefix owns the
+  // systemInstruction + tools + toolConfig — passing them again would
+  // 400 ("cached_content cannot be set with...") so we omit them. Otherwise
+  // they go on the call directly as before.
+  private buildCallConfig(
+    systemText: string,
+    dropCodeExec: boolean,
+    cachedContentName: string | null,
+  ): any {
+    if (cachedContentName) {
+      return {
+        cachedContent: cachedContentName,
+        // maxOutputTokens stays per-call — it's a generation knob, not part
+        // of the cached input.
+        maxOutputTokens: 4096,
+      }
+    }
     return {
       systemInstruction: { role: 'system', parts: [{ text: systemText }] },
       tools: this.buildTools(dropCodeExec),
@@ -632,6 +660,7 @@ export class GeminiClient {
   private async runOneTurn(
     systemText: string,
     activeContents: Content[],
+    cachedContentName: string | null,
     onProgress?: (partial: ParsedResponse) => void
   ): Promise<{
     functionCall: any | null
@@ -642,7 +671,7 @@ export class GeminiClient {
     // Scan all contents — not just the latest — because tool-loop iterations
     // preserve the original media in activeContents.
     const dropCodeExec = contentsHaveAudioVideo(activeContents)
-    const config = this.buildCallConfig(systemText, dropCodeExec)
+    const config = this.buildCallConfig(systemText, dropCodeExec, cachedContentName)
     const params = {
       model: this.modelName,
       contents: activeContents,
@@ -714,6 +743,22 @@ export class GeminiClient {
     if (dropped.length > 0) {
       console.error(`[sanitize] dropped ${dropped.length} parts with disallowed mime: ${dropped.map(d => d.mime).join(', ')}`)
     }
+
+    // If caching is opted into for this channel, try to resolve a cached
+    // prefix name. dropCodeExec depends on activeContents, but the cache key
+    // includes the tool list — for media-bearing turns we cache a different
+    // tool subset, which means a separate cache. That's fine in practice
+    // since most channels don't mix media into every turn.
+    let cachedContentName: string | null = null
+    if (args.cacheEnabled) {
+      const dropCodeExec = contentsHaveAudioVideo(activeContents)
+      const tools = this.buildTools(dropCodeExec)
+      const toolConfig = { includeServerSideToolInvocations: true }
+      cachedContentName = await this.cacheManager.getOrCreate(
+        this.client, this.modelName, systemText, tools, toolConfig,
+      )
+    }
+
     let meta: RespondMetadata | null = null
     let finalParsed: ParsedResponse = { react: null, thinking: null, reply: null }
     const toolCalls: ToolCall[] = []
@@ -722,7 +767,7 @@ export class GeminiClient {
     // Tool-call loop. Capped at 3 iterations to avoid runaway cost if the
     // model keeps calling tools in a cycle.
     for (let iteration = 0; iteration < 3; iteration++) {
-      const turn = await this.runOneTurn(systemText, activeContents, onProgress)
+      const turn = await this.runOneTurn(systemText, activeContents, cachedContentName, onProgress)
       // Aggregate grounding-search queries across iterations — googleSearch can
       // fire on any turn, not just the final one.
       for (const q of extractSearchQueries(turn.candidate)) searchQueriesAcc.add(q)

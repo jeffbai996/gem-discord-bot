@@ -50,6 +50,11 @@ export const geminiCommand = new SlashCommandBuilder()
         .setDescription('Gate non-addressed messages — only reply when actually for Gemma (default: false)')
         .setRequired(false)
       )
+      .addBooleanOption(option => option
+        .setName('cache')
+        .setDescription('Cache stable system prompt — ~25% bill on prefix (default: false)')
+        .setRequired(false)
+      )
   )
   .addSubcommand(subcommand =>
     subcommand
@@ -101,8 +106,32 @@ export const geminiCommand = new SlashCommandBuilder()
       .addBooleanOption(option => option.setName('enabled').setDescription('Enable opt-in reply gating').setRequired(true))
       .addChannelOption(option => option.setName('channel').setDescription('Channel (defaults to current)').setRequired(false))
   )
+  .addSubcommand(subcommand =>
+    subcommand
+      .setName('cache')
+      .setDescription('Quick toggle: server-side cache stable system prompt (defaults to current channel)')
+      .addBooleanOption(option => option.setName('enabled').setDescription('Enable context caching').setRequired(true))
+      .addChannelOption(option => option.setName('channel').setDescription('Channel (defaults to current)').setRequired(false))
+  )
+  .addSubcommand(subcommand =>
+    subcommand
+      .setName('clear')
+      .setDescription('Reset Gemma\'s context for this channel — next turn starts fresh')
+      .addChannelOption(option => option.setName('channel').setDescription('Channel (defaults to current)').setRequired(false))
+  )
+  .addSubcommand(subcommand =>
+    subcommand
+      .setName('compact')
+      .setDescription('Force a context-summary rollup now, regardless of message threshold')
+      .addChannelOption(option => option.setName('channel').setDescription('Channel (defaults to current)').setRequired(false))
+  )
 
-  export async function executeGeminiCommand(interaction: ChatInputCommandInteraction, access: AccessManager, persona: PersonaLoader, gemini: GeminiClient, adminUserId?: string) {
+interface ExtraDeps {
+  summaryStore: { upsert(channelId: string, summary: string, lastMessageId: string): void }
+  summarizer: { runForChannel(channelId: string): Promise<{ messageCount: number } | null> }
+}
+
+  export async function executeGeminiCommand(interaction: ChatInputCommandInteraction, access: AccessManager, persona: PersonaLoader, gemini: GeminiClient, adminUserId: string | undefined, deps: ExtraDeps) {
   // Extra layer of security: only specific user ID from .env can use this, 
   // or anyone with Server Admin if no specific ID is set.
   if (adminUserId && interaction.user.id !== adminUserId) {
@@ -132,9 +161,10 @@ export const geminiCommand = new SlashCommandBuilder()
       const showCode = interaction.options.getBoolean('show_code') ?? false
       const verbose = interaction.options.getBoolean('verbose') ?? false
       const optInReply = interaction.options.getBoolean('opt_in_reply') ?? false
-      await access.setChannel(channel.id, enabled, requireMention, { thinking, showCode, verbose, optInReply })
+      const cache = interaction.options.getBoolean('cache') ?? false
+      await access.setChannel(channel.id, enabled, requireMention, { thinking, showCode, verbose, optInReply, cache })
       return interaction.reply({
-        content: `✅ Channel <#${channel.id}> configured. Enabled: ${enabled}, Require Mention: ${requireMention}, Thinking: ${thinking}, Show Code: ${showCode}, Verbose: ${verbose}, Opt-In Reply: ${optInReply}.`,
+        content: `✅ Channel <#${channel.id}> configured. Enabled: ${enabled}, Require Mention: ${requireMention}, Thinking: ${thinking}, Show Code: ${showCode}, Verbose: ${verbose}, Opt-In Reply: ${optInReply}, Cache: ${cache}.`,
         ephemeral: true
       })
     }
@@ -210,6 +240,67 @@ export const geminiCommand = new SlashCommandBuilder()
         })
       } catch (e: any) {
         return interaction.reply({ content: `❌ ${e.message}`, ephemeral: true })
+      }
+    }
+
+    if (subcommand === 'cache') {
+      const enabled = interaction.options.getBoolean('enabled', true)
+      const channel = interaction.options.getChannel('channel') ?? interaction.channel
+      if (!channel) {
+        return interaction.reply({ content: '❌ No channel resolved (run from inside a channel or pass the channel arg).', ephemeral: true })
+      }
+      try {
+        const updated = await access.setChannelFlags(channel.id, { cache: enabled })
+        return interaction.reply({
+          content: `✅ <#${channel.id}> cache → \`${enabled}\` — ${enabled ? 'stable system prompt prefix will be cached server-side; cached portion bills at ~25%' : 'caching off'} (thinking=${updated.thinking}, showCode=${updated.showCode}, verbose=${updated.verbose}, optInReply=${updated.optInReply})`,
+          ephemeral: true
+        })
+      } catch (e: any) {
+        return interaction.reply({ content: `❌ ${e.message}`, ephemeral: true })
+      }
+    }
+
+    if (subcommand === 'clear') {
+      const channel = interaction.options.getChannel('channel') ?? interaction.channel
+      if (!channel) {
+        return interaction.reply({ content: '❌ No channel resolved (run from inside a channel or pass the channel arg).', ephemeral: true })
+      }
+      // Bump the watermark to the current interaction message id and blank
+      // the summary text. buildContextHistory uses lastSummarizedMessageId
+      // as a snowflake-ID lower bound, so anything older drops out of the
+      // history fetch on the next turn. Existing chat history is untouched
+      // on Discord's side — Gemma just stops feeding it back into the model.
+      const watermarkId = interaction.id
+      deps.summaryStore.upsert(channel.id, '', watermarkId)
+      // Cache isn't channel-specific, but clearing here forces the next turn
+      // to recreate the cache fresh — useful when /clear is being used to
+      // recover from a confused state, not just to drop history.
+      gemini.clearCache?.()
+      return interaction.reply({
+        content: `🧹 cleared context for <#${channel.id}>. Gemma will start fresh from messages newer than the slash command.`,
+        ephemeral: true,
+      })
+    }
+
+    if (subcommand === 'compact') {
+      const channel = interaction.options.getChannel('channel') ?? interaction.channel
+      if (!channel) {
+        return interaction.reply({ content: '❌ No channel resolved (run from inside a channel or pass the channel arg).', ephemeral: true })
+      }
+      // Defer because summarization can take a few seconds (LLM call).
+      await interaction.deferReply({ ephemeral: true })
+      try {
+        const result = await deps.summarizer.runForChannel(channel.id)
+        if (!result) {
+          return interaction.editReply({
+            content: `📝 nothing to compact in <#${channel.id}> — no new messages since the last rollup.`,
+          })
+        }
+        return interaction.editReply({
+          content: `📝 compacted <#${channel.id}>: rolled up ${result.messageCount} message${result.messageCount === 1 ? '' : 's'} into the channel summary.`,
+        })
+      } catch (e: any) {
+        return interaction.editReply({ content: `❌ compact failed: ${e?.message ?? e}` })
       }
     }
 

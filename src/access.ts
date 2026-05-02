@@ -11,6 +11,7 @@ export interface ChannelConfig {
   showCode?: boolean       // default false — don't render code-exec artifacts
   verbose?: boolean        // default false — surface usage/finishReason footer
   optInReply?: boolean     // default false — when true, gate non-addressed messages with a cheap classifier instead of always replying
+  cache?: boolean          // default false — when true, cache the stable system-prompt prefix server-side for cheaper input billing
 }
 
 export interface ChannelFlags {
@@ -18,6 +19,7 @@ export interface ChannelFlags {
   showCode: boolean
   verbose: boolean
   optInReply: boolean
+  cache: boolean
 }
 
 export interface AccessFile {
@@ -114,7 +116,8 @@ export class AccessManager {
       thinking: flags?.thinking ?? 'auto',
       showCode: flags?.showCode ?? false,
       verbose: flags?.verbose ?? false,
-      optInReply: flags?.optInReply ?? false
+      optInReply: flags?.optInReply ?? false,
+      cache: flags?.cache ?? false
     }
     await this.save()
   }
@@ -137,7 +140,8 @@ export class AccessManager {
       ...(patch.thinking !== undefined ? { thinking: patch.thinking } : {}),
       ...(patch.showCode !== undefined ? { showCode: patch.showCode } : {}),
       ...(patch.verbose !== undefined ? { verbose: patch.verbose } : {}),
-      ...(patch.optInReply !== undefined ? { optInReply: patch.optInReply } : {})
+      ...(patch.optInReply !== undefined ? { optInReply: patch.optInReply } : {}),
+      ...(patch.cache !== undefined ? { cache: patch.cache } : {})
     }
     await this.save()
     return this.data.channels[channelId]
@@ -151,7 +155,8 @@ export class AccessManager {
       thinking: channel?.thinking ?? 'auto',
       showCode: channel?.showCode ?? false,
       verbose: channel?.verbose ?? false,
-      optInReply: channel?.optInReply ?? false
+      optInReply: channel?.optInReply ?? false,
+      cache: channel?.cache ?? false
     }
   }
 }
