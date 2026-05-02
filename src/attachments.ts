@@ -2,7 +2,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import os from 'os'
 import { spawn } from 'child_process'
-import { GoogleAIFileManager } from '@google/generative-ai/server'
+import { GoogleGenAI } from '@google/genai'
 
 const MAX_BYTES = 20 * 1024 * 1024
 // Resolve yt-dlp path at call time (not module-load) so tests can override via env
@@ -67,28 +67,33 @@ function stateDir(): string {
 // This prevents redundant uploads of the same media within the bot's lifecycle.
 export const uriCache = new Map<string, string>()
 
-// Upload a local file via Gemini File API and poll until ACTIVE. Returns null if upload/poll fails.
-// Still used by processAttachments for user-uploaded video/audio.
+// Upload a local file via Gemini File API and poll until ACTIVE. Returns null
+// if upload/poll fails. Used by processAttachments for user-uploaded
+// video/audio. The new SDK exposes the file API on `client.files`; the legacy
+// `GoogleAIFileManager` from @google/generative-ai/server is gone.
 async function uploadAndWaitActive(
   localPath: string,
   mimeType: string,
   displayName: string,
   apiKey: string
 ): Promise<string | null> {
-  const fileManager = new GoogleAIFileManager(apiKey)
-  const uploadResult = await fileManager.uploadFile(localPath, { mimeType, displayName })
+  const client = new GoogleGenAI({ apiKey })
+  let file = await client.files.upload({
+    file: localPath,
+    config: { mimeType, displayName },
+  })
 
   fs.rm(localPath, { force: true }).catch(() => {})
 
-  let file = uploadResult.file
   let retries = 0
   const MAX_RETRIES = 10
   while (file.state === 'PROCESSING' && retries < MAX_RETRIES) {
     await new Promise(r => setTimeout(r, 2000))
-    file = await fileManager.getFile(file.name)
+    if (!file.name) break
+    file = await client.files.get({ name: file.name })
     retries++
   }
-  return file.state === 'ACTIVE' ? file.uri : null
+  return file.state === 'ACTIVE' && file.uri ? file.uri : null
 }
 
 // Strip WebVTT markup down to plain text. Auto-captions contain rolling-display

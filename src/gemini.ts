@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI, type Content, type Part } from '@google/generative-ai'
+import { GoogleGenAI, type Content, type Part } from '@google/genai'
 import type { GeminiContent } from './history.ts'
 import type { MediaPart } from './attachments.ts'
 import { isAllowedMime } from './attachments.ts'
@@ -514,34 +514,21 @@ export function sanitizeContents(contents: Content[]): { sanitized: Content[]; d
 }
 
 export class GeminiClient {
-  private model: ReturnType<GoogleGenerativeAI['getGenerativeModel']>
+  private client: GoogleGenAI
+  private modelName: string
   private registry: ToolRegistry
   private apiKey: string
 
   constructor(apiKey: string, modelName: string = 'gemini-2.0-flash', registry: ToolRegistry) {
     this.apiKey = apiKey
     this.registry = registry
-    const genAI = new GoogleGenerativeAI(apiKey)
-    // Gemini requires `includeServerSideToolInvocations: true` in toolConfig
-    // when mixing built-in tools (googleSearch, codeExecution) with user
-    // functionDeclarations. Without it, the API 400s with:
-    //   "Please enable tool_config.include_server_side_tool_invocations
-    //    to use Built-in tools with Function calling."
-    // The SDK's ToolConfig type doesn't expose this field yet — cast.
-    this.model = genAI.getGenerativeModel({
-      model: modelName,
-      tools: this.buildTools(false),
-      toolConfig: { includeServerSideToolInvocations: true } as any,
-      // Hard cap on output to bound cost when the model degenerates into a
-      // token-repetition loop (seen 2026-04-29 with gemini-3-flash-preview
-      // emitting `5v57_5v57_...` to max output). gemini-3-pro-preview rejects
-      // frequencyPenalty/presencePenalty with 400 ("Penalty is not enabled for
-      // this model") — relying on the pro model's stronger instruction-following
-      // for repetition resistance instead.
-      generationConfig: {
-        maxOutputTokens: 4096
-      } as any
-    })
+    this.modelName = modelName
+    // @google/genai is the maintained replacement for @google/generative-ai
+    // (the legacy SDK was unmaintained, had a stream-parse bug, and stripped
+    // unknown fields like thoughtSignature on response parsing — the latter
+    // broke gemini-3 thinking models on tool-loop iteration 2 with
+    // "Function call is missing a thought_signature" 400s).
+    this.client = new GoogleGenAI({ apiKey })
   }
 
   // Tool list. codeExecution is omitted when the request payload contains
@@ -594,24 +581,49 @@ export class GeminiClient {
   }
 
   async countTokens(contents: Content[]): Promise<number> {
-    const result = await this.model.countTokens({ contents })
-    return result.totalTokens
+    const result = await this.client.models.countTokens({
+      model: this.modelName,
+      contents,
+    })
+    return result.totalTokens ?? 0
   }
 
   // Single-turn text completion. No streaming, no tool dispatch — used for
   // background tasks like summarization where we just want plain text out.
   async completeText(systemPrompt: string, userText: string): Promise<string> {
-    const result = await this.model.generateContent({
-      systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
-      contents: [{ role: 'user', parts: [{ text: userText }] }]
+    const result = await this.client.models.generateContent({
+      model: this.modelName,
+      contents: [{ role: 'user', parts: [{ text: userText }] }],
+      config: {
+        systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
+      },
     })
-    const candidate = result.response.candidates?.[0]
+    const candidate = result.candidates?.[0]
     const parts = (candidate?.content?.parts ?? []) as any[]
     return parts
       .filter(p => typeof p.text === 'string' && !p.executableCode && !p.codeExecutionResult && !p.functionCall)
       .map(p => p.text as string)
       .join('\n')
       .trim()
+  }
+
+  // Build the per-call config object common to both streaming and non-streaming.
+  // System prompt + tools + tool_config + maxOutputTokens cap. Caller passes
+  // the dropCodeExec flag based on contentsHaveAudioVideo.
+  private buildCallConfig(systemText: string, dropCodeExec: boolean): any {
+    return {
+      systemInstruction: { role: 'system', parts: [{ text: systemText }] },
+      tools: this.buildTools(dropCodeExec),
+      // includeServerSideToolInvocations is required when mixing built-in
+      // tools (googleSearch / codeExecution) with functionDeclarations.
+      toolConfig: { includeServerSideToolInvocations: true } as any,
+      // Hard cap to bound cost on degenerate-generation token loops (seen
+      // 2026-04-29 with gemini-3-flash-preview emitting `5v57_5v57_…` to
+      // max output). gemini-3-pro-preview rejects frequencyPenalty /
+      // presencePenalty with 400 — rely on its instruction-following for
+      // repetition resistance instead.
+      maxOutputTokens: 4096,
+    }
   }
 
   // One round-trip with the model. Handles both streaming (when onProgress
@@ -627,24 +639,24 @@ export class GeminiClient {
     response: any
     text: string
   }> {
-    // Decide whether to drop codeExecution for this turn (see buildTools
-    // comment for why). Scan all contents — not just the latest — because
-    // tool-loop iterations preserve the original media in activeContents.
+    // Scan all contents — not just the latest — because tool-loop iterations
+    // preserve the original media in activeContents.
     const dropCodeExec = contentsHaveAudioVideo(activeContents)
-    const tools = this.buildTools(dropCodeExec)
+    const config = this.buildCallConfig(systemText, dropCodeExec)
+    const params = {
+      model: this.modelName,
+      contents: activeContents,
+      config,
+    }
+
     if (onProgress) {
       try {
-        const result = await this.model.generateContentStream({
-          systemInstruction: { role: 'system', parts: [{ text: systemText }] },
-          contents: activeContents,
-          tools,
-          toolConfig: { includeServerSideToolInvocations: true } as any
-        })
-
         let accumulatedText = ''
         let functionCallReceived: any = null
-
-        for await (const chunk of result.stream) {
+        let lastChunk: any = null
+        const stream = await this.client.models.generateContentStream(params)
+        for await (const chunk of stream) {
+          lastChunk = chunk
           const parts = chunk.candidates?.[0]?.content?.parts as any[] | undefined
           const fnCallPart = parts?.find(p => p.functionCall)
           if (fnCallPart) functionCallReceived = fnCallPart.functionCall
@@ -654,53 +666,39 @@ export class GeminiClient {
             onProgress(parseResponse(accumulatedText, true))
           }
         }
-
-        const response = await result.response
-        const candidate = response.candidates?.[0]
+        // The last chunk in @google/genai's stream carries the aggregated
+        // candidate (including final usage_metadata). Older SDK had a
+        // separate `result.response` object; the new one streams the same
+        // shape and the trailing chunk is the canonical view.
+        const candidate = lastChunk?.candidates?.[0]
         const parts = candidate?.content?.parts as any[] | undefined
         // Prefer streamed accumulated text; fall back to joined parts if the
         // stream yielded nothing text-ish (e.g., pure function-call turn).
         const text = accumulatedText || extractModelText(parts)
         const fnCall = functionCallReceived || parts?.find(p => p.functionCall)?.functionCall || null
-        return { functionCall: fnCall, candidate, response, text }
+        return { functionCall: fnCall, candidate, response: lastChunk, text }
       } catch (e: any) {
-        // @google/generative-ai 0.21–0.24 throws "Failed to parse stream" when
-        // gemini-3-pro emits SSE chunks without the trailing \n\n the SDK regex
-        // requires (responseLineRE in dist/index.mjs:653). The model reply may
-        // already be complete server-side — fall back to non-streaming so the
-        // user actually gets it. The non-streaming JSON path doesn't share the
-        // SSE parser. Bug isn't fixed in 0.24.1; proper fix is migrating to
-        // @google/genai. Logged here so we can track frequency.
         const msg = e?.message ?? String(e)
-        if (msg.includes('Failed to parse stream')) {
-          console.error('[stream parse failed, falling back to non-streaming]', msg)
-          // Fall through to non-streaming path below.
-        } else if (e?.status === 400 || /\b400 Bad Request\b/.test(msg) || e?.name === 'GoogleGenerativeAIFetchError') {
-          // Payload-level rejection — bad mime type, malformed parts, etc.
-          // Don't retry on the non-streaming path; same payload will fail.
-          // Pull the human-readable bit out of the noisy SDK message. Format:
-          //   "[GoogleGenerativeAI Error]: Error fetching from <url>: [400 ...] <reason>."
-          const reasonMatch = msg.match(/\[400 Bad Request\]\s*(.+?)(?:\n|$)/)
+        // @google/genai surfaces 400s as ApiError with status — same shape
+        // for malformed parts, mime rejections, etc. Don't retry on the
+        // non-streaming path; the same payload will fail the same way.
+        if (e?.status === 400 || /\b400\b/.test(msg) || e?.name === 'ApiError') {
+          // Pull the human-readable bit out of the SDK message.
+          const reasonMatch = msg.match(/\[400[^\]]*\]\s*(.+?)(?:\n|$)/) || msg.match(/"message":\s*"([^"]+)"/)
           const reason = reasonMatch ? reasonMatch[1].trim() : msg
           console.error('[gemini 400]', reason)
           throw new GeminiRequestRejected(reason, 400)
-        } else {
-          throw e
         }
+        throw e
       }
     }
 
-    const result = await this.model.generateContent({
-      systemInstruction: { role: 'system', parts: [{ text: systemText }] },
-      contents: activeContents,
-      tools,
-      toolConfig: { includeServerSideToolInvocations: true } as any
-    })
-    const candidate = result.response.candidates?.[0]
+    const result = await this.client.models.generateContent(params)
+    const candidate = result.candidates?.[0]
     const parts = candidate?.content?.parts as any[] | undefined
     const fnCall = parts?.find(p => p.functionCall)?.functionCall || null
     const text = extractModelText(parts)
-    return { functionCall: fnCall, candidate, response: result.response, text }
+    return { functionCall: fnCall, candidate, response: result, text }
   }
 
   async respond(

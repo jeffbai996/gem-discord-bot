@@ -1,4 +1,4 @@
-import { SchemaType } from '@google/generative-ai'
+import { Type } from '@google/genai'
 import type { Tool } from './registry.ts'
 
 // Registered only when MCP connect fails at boot. Gives the model a valid
@@ -9,7 +9,7 @@ export const ibkrUnreachableStub: Tool = {
   declaration: {
     name: 'ibkr_briefing',
     description: 'Get a portfolio briefing from IBKR. Currently UNREACHABLE — IBKR MCP server is not running. Calling this tool will return an error string explaining the situation.',
-    parameters: { type: SchemaType.OBJECT, properties: {}, required: [] }
+    parameters: { type: Type.OBJECT, properties: {}, required: [] }
   },
   async execute() {
     return 'IBKR MCP server is not reachable. Tell the user their IBKR connection is offline and they should start the server at ~/repos/ibkr-terminal/server_http.py.'
