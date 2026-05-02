@@ -233,9 +233,18 @@ Coverage: access manager (allowlist + flags + invariants), gemini client (respon
 
 ---
 
+## Versioning
+
+Versions are flat `0.MAJOR` (no patch level) — each version reflects a shippable feature epoch. Intermediate fixes fold into the surrounding range; not every fix gets its own tag. Pre-1.0, so breaking changes are possible between minors until the public API stabilizes.
+
+Latest: **v0.12** — mid-stream lifecycle reactions (`📎 🧠 🌐 🔧 ✂️ 🛑`).
+
+See [`CHANGELOG.md`](./CHANGELOG.md) for the full release history. Tags are annotated; `git checkout v0.N` to inspect any prior version.
+
+---
+
 ## Future Roadmap
 
 - **Proactive cron jobs:** scheduled Gemma broadcasts (daily portfolio briefings, risk alerts, earnings summaries) into a dedicated channel.
 - **Multi-agent debates:** delegate sub-tasks (`jules-review` on a GitHub link) or spawn secondary instances to argue both sides of a thesis.
 - **Voice channel intake:** join Discord voice and transcribe/process audio streams natively via Gemini's multimodal stack.
-- **Migration to `@google/genai`:** the legacy `@google/generative-ai` SDK is unmaintained and has known stream-parse bugs we're working around. New SDK is the long-term fix.
