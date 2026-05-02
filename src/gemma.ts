@@ -13,6 +13,7 @@ import { insertMessage } from './db.ts'
 import { buildDefaultRegistry } from './tools/index.ts'
 import { PendingEditsStore } from './reactions/pending-edits.ts'
 import { applyLifecycle } from './reactions/lifecycle.ts'
+import type { LifecycleEvent } from './gemini.ts'
 import { PinnedFactsStore } from './pinned-facts.ts'
 import { handleReaction } from './reactions/handler.ts'
 import { SummaryStore } from './summarization/store.ts'
@@ -227,6 +228,17 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
     const summaryRecord = summaryStore.get(message.channelId)
     const sinceMessageId = summaryRecord?.lastSummarizedMessageId ?? null
 
+    // 📎 Fire ingesting reaction if there's anything non-trivial to process
+    // pre-generate (Discord attachments OR YouTube URLs in the message
+    // content). Cheap "I see your file/link, I'm working on it" indicator
+    // that lasts the few seconds processAttachments / processYouTubeUrls
+    // typically take. Per Jeff's request youtube ingestion is grouped under
+    // attachment processing rather than getting a separate emoji.
+    const hasIngest = message.attachments.size > 0 || /youtu/i.test(message.content)
+    if (hasIngest) {
+      applyLifecycle(message, 'ingesting').catch(() => {})
+    }
+
     const [history, attachmentResult, ytResult] = await Promise.all([
       buildContextHistory(message.channel as any, message.id, gemini, client.user!.id, MAX_HISTORY_TOKENS, sinceMessageId),
       processAttachments(
@@ -317,6 +329,24 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
       : message.content
 
     const respondT0 = Date.now()
+    // Track active in-flight tool calls so we know when 🔧 should drop.
+    // gemini.ts emits start/end pairs per dispatch.
+    let activeToolCount = 0
+    const onLifecycleEvent = (e: LifecycleEvent) => {
+      if (e.type === 'native_thinking') {
+        applyLifecycle(message, 'native_thinking').catch(() => {})
+      } else if (e.type === 'searching') {
+        applyLifecycle(message, 'searching').catch(() => {})
+      } else if (e.type === 'tool_call_start') {
+        activeToolCount += 1
+        applyLifecycle(message, 'tooling').catch(() => {})
+      } else if (e.type === 'tool_call_end') {
+        activeToolCount = Math.max(0, activeToolCount - 1)
+        // We don't actively drop 🔧 when activeToolCount hits 0 — the
+        // terminal state (✅ / ❌ / etc) cleans up all transients
+        // anyway, and a tool ending mid-turn just means we keep going.
+      }
+    }
     const { parsed, meta } = await gemini.respond({
       systemPrompt: persona.buildSystemPrompt(message.channelId),
       history,
@@ -329,7 +359,7 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
       cacheTtlSec: flags.cacheTtlSec ?? undefined,
     }, (partial) => {
       latestParsed = partial
-    })
+    }, onLifecycleEvent)
     const respondElapsedMs = Date.now() - respondT0
 
     if (streamInterval) {
@@ -513,10 +543,16 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
        finalFullReply = '(Empty response)'
     }
 
-    // Lifecycle: ✅ now that we have content to commit. Cleans up 🤔/👀.
+    // Lifecycle terminal: pick the right final state based on finishReason.
+    // 🛑 SAFETY — reply was blocked / heavily filtered
+    // ✂️ MAX_TOKENS — reply hit budget cap, may be cut off mid-thought
+    // ✅ everything else (STOP, FINISH_REASON_UNSPECIFIED) — normal commit
     // Fires before the actual edit since the edit is multi-step and we
     // want the indicator to flip the moment the bot is "done thinking".
-    applyLifecycle(message, 'replied').catch(() => {})
+    let terminalState: 'replied' | 'truncated' | 'blocked' = 'replied'
+    if (meta.finishReason === 'SAFETY') terminalState = 'blocked'
+    else if (meta.finishReason === 'MAX_TOKENS') terminalState = 'truncated'
+    applyLifecycle(message, terminalState).catch(() => {})
 
     if (finalFullReply) {
       // Edit streaming preview messages in place to become the final output.
@@ -561,8 +597,6 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
 
   } catch (e: any) {
     console.error('message handler error:', e)
-    // Lifecycle: ❌ on caught error. Cleans up 👀/🤔.
-    applyLifecycle(message, 'errored').catch(() => {})
     // Match explicit rate-limit language only. The naive /rate/i matched
     // "generateContent" in every Gemini URL, causing unrelated 400s to look
     // like rate limits. Anchor on word boundaries + the actual phrase.
@@ -571,6 +605,9 @@ async function handleUserMessage(message: Message, opts: HandleOpts = {}): Promi
       || /\brate limit\b/i.test(msgStr)
       || /\bquota\b/i.test(msgStr)
       || /\btoo many requests\b/i.test(msgStr)
+    // Lifecycle: ⚠️ for rate-limit / quota (denied semantics), ❌ for
+    // anything else. Both clean up all transients.
+    applyLifecycle(message, isRateLimit ? 'denied' : 'errored').catch(() => {})
     let msg: string
     if (e instanceof GeminiRequestRejected) {
       // Surface the actual rejection reason — usually unsupported mime type

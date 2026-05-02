@@ -480,6 +480,20 @@ export interface RespondResult {
   meta: RespondMetadata
 }
 
+/**
+ * Mid-stream lifecycle events emitted from gemini.ts. gemma.ts subscribes
+ * via the `onEvent` callback to surface visible reactions.
+ *
+ * Fired at most once per type per `respond()` call (the underlying loop
+ * may dispatch multiple tool calls, but the user only needs to see "she
+ * used a tool" once — repeats would just thrash the reaction).
+ */
+export type LifecycleEvent =
+  | { type: 'searching' }
+  | { type: 'native_thinking' }
+  | { type: 'tool_call_start', name: string }
+  | { type: 'tool_call_end', name: string, failed: boolean }
+
 export interface BuildRequestArgs {
   systemPrompt: string
   history: GeminiContent[]
@@ -664,11 +678,17 @@ export class GeminiClient {
   // One round-trip with the model. Handles both streaming (when onProgress
   // provided) and non-streaming, returning a unified shape so the caller's
   // tool loop doesn't branch on streaming vs not.
+  //
+  // onEvent fires for in-flight lifecycle signals: native thinking starts,
+  // grounding-search results arrive, etc. Each event type fires at most
+  // once per `runOneTurn` call (de-duped via the `emitted` set so streams
+  // that yield N grounding chunks don't spam N reactions).
   private async runOneTurn(
     systemText: string,
     activeContents: Content[],
     cachedContentName: string | null,
-    onProgress?: (partial: ParsedResponse) => void
+    onProgress?: (partial: ParsedResponse) => void,
+    onEvent?: (e: LifecycleEvent) => void
   ): Promise<{
     functionCall: any | null
     candidate: any
@@ -690,10 +710,30 @@ export class GeminiClient {
         let accumulatedText = ''
         let functionCallReceived: any = null
         let lastChunk: any = null
+        // De-dupe one-shot events across chunks within this turn.
+        const emitted = new Set<LifecycleEvent['type']>()
+        const emitOnce = (e: LifecycleEvent) => {
+          if (emitted.has(e.type)) return
+          emitted.add(e.type)
+          if (onEvent) {
+            try { onEvent(e) } catch (err) { console.error('[onEvent]', err) }
+          }
+        }
         const stream = await this.client.models.generateContentStream(params)
         for await (const chunk of stream) {
           lastChunk = chunk
-          const parts = chunk.candidates?.[0]?.content?.parts as any[] | undefined
+          const candidate = chunk.candidates?.[0]
+          const parts = candidate?.content?.parts as any[] | undefined
+          // Native thinking parts: gemini-3 thinking models emit text parts
+          // with `thought: true`. First time we see one, fire 🧠.
+          if (parts?.some(p => p?.thought === true)) {
+            emitOnce({ type: 'native_thinking' })
+          }
+          // Grounding search: candidate.groundingMetadata.webSearchQueries
+          // populates as soon as the search runs server-side.
+          if (extractSearchQueries(candidate).length > 0) {
+            emitOnce({ type: 'searching' })
+          }
           const fnCallPart = parts?.find(p => p.functionCall)
           if (fnCallPart) functionCallReceived = fnCallPart.functionCall
           const textChunk = extractModelText(parts)
@@ -739,7 +779,8 @@ export class GeminiClient {
 
   async respond(
     args: BuildRequestArgs,
-    onProgress?: (partial: ParsedResponse) => void
+    onProgress?: (partial: ParsedResponse) => void,
+    onEvent?: (e: LifecycleEvent) => void
   ): Promise<RespondResult> {
     const userTurn = buildUserTurn(args)
     const systemText = formatSystemPrompt(args.systemPrompt, args.thinkingMode ?? 'auto')
@@ -775,7 +816,7 @@ export class GeminiClient {
     // Tool-call loop. Capped at 3 iterations to avoid runaway cost if the
     // model keeps calling tools in a cycle.
     for (let iteration = 0; iteration < 3; iteration++) {
-      const turn = await this.runOneTurn(systemText, activeContents, cachedContentName, onProgress)
+      const turn = await this.runOneTurn(systemText, activeContents, cachedContentName, onProgress, onEvent)
       // Aggregate grounding-search queries across iterations — googleSearch can
       // fire on any turn, not just the final one.
       for (const q of extractSearchQueries(turn.candidate)) searchQueriesAcc.add(q)
@@ -823,6 +864,13 @@ export class GeminiClient {
       activeContents.push({ role: 'model', parts: [fnCallPart] })
       const fnName = turn.functionCall.name
       const fnArgs = (turn.functionCall.args ?? {}) as Record<string, unknown>
+      // Surface the tool call to the caller's lifecycle hook BEFORE we
+      // dispatch — gives the user visible feedback that something tool-y
+      // is in flight, instead of a quiet several-second pause.
+      if (onEvent) {
+        try { onEvent({ type: 'tool_call_start', name: fnName }) }
+        catch (err) { console.error('[onEvent]', err) }
+      }
       const t0 = Date.now()
       let result: unknown
       let failed = false
@@ -833,6 +881,10 @@ export class GeminiClient {
         result = { error: e?.message ?? String(e) }
       }
       const durationMs = Date.now() - t0
+      if (onEvent) {
+        try { onEvent({ type: 'tool_call_end', name: fnName, failed }) }
+        catch (err) { console.error('[onEvent]', err) }
+      }
       toolCalls.push({
         name: fnName,
         args: fnArgs,
