@@ -24,40 +24,10 @@ export const geminiCommand = new SlashCommandBuilder()
   .addSubcommand(subcommand =>
     subcommand
       .setName('channel')
-      .setDescription('Configure bot access for a channel')
+      .setDescription('Set bot access for a channel — enable + mention rule. Other flags via dedicated subcommands.')
       .addChannelOption(option => option.setName('channel').setDescription('The channel to configure').setRequired(true))
       .addBooleanOption(option => option.setName('enabled').setDescription('Enable bot in this channel').setRequired(true))
       .addBooleanOption(option => option.setName('require_mention').setDescription('Require explicit mention').setRequired(true))
-      .addStringOption(option => option
-        .setName('thinking')
-        .setDescription('When to render the 💭 thinking block (default: auto)')
-        .setRequired(false)
-        .addChoices(
-          { name: 'always — force CoT block on every reply', value: 'always' },
-          { name: 'auto — Gemma decides per message', value: 'auto' },
-          { name: 'never — suppress CoT block entirely', value: 'never' }
-        )
-      )
-      .addBooleanOption(option => option
-        .setName('show_code')
-        .setDescription('Render code-execution artifacts (default: false)')
-        .setRequired(false)
-      )
-      .addBooleanOption(option => option
-        .setName('verbose')
-        .setDescription('Surface usage/finishReason footer (default: false)')
-        .setRequired(false)
-      )
-      .addBooleanOption(option => option
-        .setName('opt_in_reply')
-        .setDescription('Gate non-addressed messages — only reply when actually for Gemma (default: false)')
-        .setRequired(false)
-      )
-      .addBooleanOption(option => option
-        .setName('cache')
-        .setDescription('Cache stable system prompt — ~25% bill on prefix (default: false)')
-        .setRequired(false)
-      )
   )
   .addSubcommand(subcommand =>
     subcommand
@@ -190,18 +160,19 @@ interface ExtraDeps {
       return interaction.reply({ content: `✅ Access revoked for ${targetUser.tag}.`, ephemeral: true })
     }
 
+    // /gemini channel only sets the two essentials (enabled + require_mention).
+    // Other flags (thinking/showcode/verbose/optinreply/cache) have dedicated
+    // subcommands that toggle them independently — having them here too was
+    // redundant and made the command form unwieldy. setChannel preserves
+    // existing flag values when called on an already-configured channel.
     if (subcommand === 'channel') {
       const channel = interaction.options.getChannel('channel', true)
       const enabled = interaction.options.getBoolean('enabled', true)
       const requireMention = interaction.options.getBoolean('require_mention', true)
-      const thinking = (interaction.options.getString('thinking') ?? 'auto') as 'always' | 'auto' | 'never'
-      const showCode = interaction.options.getBoolean('show_code') ?? false
-      const verbose = interaction.options.getBoolean('verbose') ?? false
-      const optInReply = interaction.options.getBoolean('opt_in_reply') ?? false
-      const cache = interaction.options.getBoolean('cache') ?? false
-      await access.setChannel(channel.id, enabled, requireMention, { thinking, showCode, verbose, optInReply, cache })
+      await access.setChannel(channel.id, enabled, requireMention)
+      const flags = access.channelFlags(channel.id)
       return interaction.reply({
-        content: `✅ Channel <#${channel.id}> configured. Enabled: ${enabled}, Require Mention: ${requireMention}, Thinking: ${thinking}, Show Code: ${showCode}, Verbose: ${verbose}, Opt-In Reply: ${optInReply}, Cache: ${cache}.`,
+        content: `✅ <#${channel.id}> configured. enabled=${enabled}, requireMention=${requireMention}. other flags (thinking=${flags.thinking}, showCode=${flags.showCode}, verbose=${flags.verbose}, optInReply=${flags.optInReply}, cache=${flags.cache}) — change via /gemini thinking|showcode|verbose|optinreply|cache.`,
         ephemeral: true
       })
     }

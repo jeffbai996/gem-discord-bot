@@ -88,9 +88,9 @@ describe('AccessManager', () => {
     assert.equal(mgr.canHandle({ channelId: 'C1', userId: 'U1', isMention: false }), true)
   })
 
-  // Per-channel rendering flags: thinking (always|auto|never) and showCode
-  // (toggle for rendering code-execution artifacts). Old configs without
-  // these fields default to "auto" + false respectively — back-compat.
+  // Per-channel rendering flags. Defaults updated 2026-05-02: showCode,
+  // verbose, optInReply, cache all default to true; thinking stays "auto".
+  // Old configs missing these fields fall through to the new defaults.
   test('channelFlags defaults when fields missing', async () => {
     await writeAccess({
       users: { U1: { allowed: true } },
@@ -100,20 +100,23 @@ describe('AccessManager', () => {
     await mgr.load()
     const f = mgr.channelFlags('C1')
     assert.equal(f.thinking, 'auto')
-    assert.equal(f.showCode, false)
+    assert.equal(f.showCode, true)
+    assert.equal(f.verbose, true)
+    assert.equal(f.optInReply, true)
+    assert.equal(f.cache, true)
   })
 
   test('channelFlags reads explicit values', async () => {
     await writeAccess({
       users: { U1: { allowed: true } },
       channels: {
-        C1: { enabled: true, requireMention: false, thinking: 'always', showCode: true },
-        C2: { enabled: true, requireMention: false, thinking: 'never', showCode: false }
+        C1: { enabled: true, requireMention: false, thinking: 'always', showCode: true, verbose: true, optInReply: true, cache: true },
+        C2: { enabled: true, requireMention: false, thinking: 'never', showCode: false, verbose: false, optInReply: false, cache: false }
       }
     })
     mgr = new AccessManager()
     await mgr.load()
-    assert.deepEqual(mgr.channelFlags('C1'), { thinking: 'always', showCode: true, verbose: false, optInReply: false, cache: false, cacheTtlSec: null })
+    assert.deepEqual(mgr.channelFlags('C1'), { thinking: 'always', showCode: true, verbose: true, optInReply: true, cache: true, cacheTtlSec: null })
     assert.deepEqual(mgr.channelFlags('C2'), { thinking: 'never', showCode: false, verbose: false, optInReply: false, cache: false, cacheTtlSec: null })
   })
 
@@ -121,27 +124,48 @@ describe('AccessManager', () => {
     await writeAccess({ users: {}, channels: {} })
     mgr = new AccessManager()
     await mgr.load()
-    assert.deepEqual(mgr.channelFlags('unknown'), { thinking: 'auto', showCode: false, verbose: false, optInReply: false, cache: false, cacheTtlSec: null })
+    assert.deepEqual(mgr.channelFlags('unknown'), { thinking: 'auto', showCode: true, verbose: true, optInReply: true, cache: true, cacheTtlSec: null })
   })
 
   test('setChannel preserves optional flags when provided', async () => {
     await writeAccess({ users: {}, channels: {} })
     mgr = new AccessManager()
     await mgr.load()
-    await mgr.setChannel('C1', true, false, { thinking: 'always', showCode: true })
+    await mgr.setChannel('C1', true, false, { thinking: 'always', showCode: false })
     const f = mgr.channelFlags('C1')
     assert.equal(f.thinking, 'always')
-    assert.equal(f.showCode, true)
+    assert.equal(f.showCode, false)
   })
 
-  test('setChannel with no flags defaults to auto/false', async () => {
+  test('setChannel with no flags applies new defaults', async () => {
     await writeAccess({ users: {}, channels: {} })
     mgr = new AccessManager()
     await mgr.load()
     await mgr.setChannel('C1', true, false)
     const f = mgr.channelFlags('C1')
     assert.equal(f.thinking, 'auto')
+    assert.equal(f.showCode, true)
+    assert.equal(f.verbose, true)
+    assert.equal(f.optInReply, true)
+    assert.equal(f.cache, true)
+  })
+
+  test('setChannel preserves existing flags on reconfigure', async () => {
+    // Re-running /gemini channel must not silently reset thinking/showCode/
+    // verbose/optInReply/cache to defaults — those are set via dedicated
+    // subcommands and should survive.
+    await writeAccess({ users: {}, channels: {} })
+    mgr = new AccessManager()
+    await mgr.load()
+    await mgr.setChannel('C1', true, false, { thinking: 'never', showCode: false, verbose: false, optInReply: false, cache: false })
+    // Now reconfigure with only the required args
+    await mgr.setChannel('C1', true, true)
+    const f = mgr.channelFlags('C1')
+    assert.equal(f.thinking, 'never')
     assert.equal(f.showCode, false)
+    assert.equal(f.verbose, false)
+    assert.equal(f.optInReply, false)
+    assert.equal(f.cache, false)
   })
 
   test('setChannel rejects invalid thinking mode', async () => {
