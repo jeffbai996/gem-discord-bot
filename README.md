@@ -84,11 +84,8 @@ Configured emoji reactions on bot messages trigger ops via `PinnedFactsStore`. I
 Manage the bot directly from Discord without touching terminal files. Requires `DISCORD_ADMIN_ID` in `.env` (or Server Admin permissions).
 
 - `/gemini allow @user` / `/gemini revoke @user`
-- `/gemini channel #channel enabled require_mention` — set/unset bot access in a channel. Other flags (thinking / show_code / verbose / opt_in_reply / cache) live on dedicated subcommands below; reconfiguring a channel preserves their existing values.
-- `/gemini thinking <always|auto|never> [#channel]` — quick toggle for the 💭 block
-- `/gemini showcode <true|false> [#channel]` — quick toggle for code artifacts + tool-call surface + 🔍 web search
-- `/gemini verbose <true|false> [#channel]` — quick toggle for token footer + 🧠 reasoning
-- `/gemini optinreply <true|false> [#channel]` — quick toggle for the reply gate (when on, Gemma stays silent on messages not addressed to her)
+- `/gemini channel #channel enabled require_mention` — set/unset bot access in a channel. Other flags live on `/gemini set` and `/gemini cache`; reconfiguring a channel preserves their existing values.
+- `/gemini set <flag> <value> [#channel]` — set per-channel render flags. `flag` is one of `thinking` (`always|auto|never`), `show_code` (`true|false`), `verbose` (`true|false`).
 - `/gemini cache on|off [#channel]` — enable/disable server-side caching of the stable system-prompt prefix (~50–70% input-cost reduction on a hit; see Context caching above)
 - `/gemini cache info` — live cache details: size, hits, age, TTL remaining, hash
 - `/gemini cache ttl <seconds> [#channel]` — override TTL per channel (60–86400; pass `0` to reset to default)
@@ -138,7 +135,6 @@ All runtime state lives in `~/.gemini/channels/discord/` (override via `DISCORD_
       "thinking": "auto",
       "showCode": true,
       "verbose": true,
-      "optInReply": true,
       "cache": true,
       "cacheTtlSec": null
     }
@@ -150,7 +146,6 @@ All runtime state lives in `~/.gemini/channels/discord/` (override via `DISCORD_
 - `thinking`: `"always"` | `"auto"` | `"never"` (default `"auto"`)
 - `showCode`: render code-execution artifacts + tool calls + web-search queries (default `true`)
 - `verbose`: render the token/time footer + native reasoning block (default `true`)
-- `optInReply`: when `true`, Gemma runs a cheap two-tier gate (regex → flash-lite classifier) on every inbound message and stays silent unless the gate decides she's the intended addressee. Useful for high-traffic channels where she shouldn't reply to every line. When this flag is on and the message isn't for her, no LLM call happens and no `💭 *Thinking...*` placeholder posts. (default `true`)
 - `cache`: enable server-side context caching for the stable system-prompt prefix; cached portion bills at ~25% of normal input rate, so an active channel sees ~50–70% input-cost reduction (default `true` — see Context caching above).
 - `cacheTtlSec`: optional per-channel override of the cache TTL in seconds. `null` (default) means use the manager default (`7200s` / 2h). Set with `/gemini cache ttl`.
 - All flags are modifiable via `/gemini` slash commands.

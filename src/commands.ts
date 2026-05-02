@@ -1,5 +1,5 @@
 import { SlashCommandBuilder, PermissionFlagsBits, ChatInputCommandInteraction, TextChannel } from 'discord.js'
-import { AccessManager } from './access.ts'
+import { AccessManager, type ThinkingMode } from './access.ts'
 import { PersonaLoader } from './persona.ts'
 import { GeminiClient } from './gemini.ts'
 import { GeminiCacheManager } from './cache.ts'
@@ -24,7 +24,7 @@ export const geminiCommand = new SlashCommandBuilder()
   .addSubcommand(subcommand =>
     subcommand
       .setName('channel')
-      .setDescription('Set bot access for a channel — enable + mention rule. Other flags via dedicated subcommands.')
+      .setDescription('Set bot access for a channel — enable + mention rule. Other flags via /gemini set.')
       .addChannelOption(option => option.setName('channel').setDescription('The channel to configure').setRequired(true))
       .addBooleanOption(option => option.setName('enabled').setDescription('Enable bot in this channel').setRequired(true))
       .addBooleanOption(option => option.setName('require_mention').setDescription('Require explicit mention').setRequired(true))
@@ -42,41 +42,30 @@ export const geminiCommand = new SlashCommandBuilder()
       .addChannelOption(option => option.setName('channel').setDescription('Channel to scrape').setRequired(true))
       .addIntegerOption(option => option.setName('limit').setDescription('Max messages to embed').setMinValue(1).setMaxValue(500).setRequired(false))
   )
+  // Unified per-flag setter. Replaces individual /gemini thinking|showcode|
+  // verbose subcommands. `value` is a string because values vary per flag
+  // (thinking: always|auto|never; others: true|false). The handler validates.
+  // `cache on/off` lives under the cache subcommand group below since it
+  // shares semantics with cache info|ttl|flush.
   .addSubcommand(subcommand =>
     subcommand
-      .setName('thinking')
-      .setDescription('Quick toggle: set thinking mode for a channel (defaults to current channel)')
+      .setName('set')
+      .setDescription('Set a per-channel flag (thinking, show_code, verbose). Defaults to current channel.')
       .addStringOption(option => option
-        .setName('mode')
-        .setDescription('When to render the 💭 thinking block')
+        .setName('flag')
+        .setDescription('Which flag to set')
         .setRequired(true)
         .addChoices(
-          { name: 'always — force CoT block on every reply', value: 'always' },
-          { name: 'auto — Gemma decides per message', value: 'auto' },
-          { name: 'never — suppress CoT block entirely', value: 'never' }
+          { name: 'thinking — when to render the 💭 thinking block', value: 'thinking' },
+          { name: 'show_code — render code/tool artifacts + 🔍 web-search', value: 'show_code' },
+          { name: 'verbose — usage/timing footer + 🧠 reasoning block', value: 'verbose' },
         )
       )
-      .addChannelOption(option => option.setName('channel').setDescription('Channel (defaults to current)').setRequired(false))
-  )
-  .addSubcommand(subcommand =>
-    subcommand
-      .setName('showcode')
-      .setDescription('Quick toggle: render code-execution artifacts (defaults to current channel)')
-      .addBooleanOption(option => option.setName('enabled').setDescription('Show code artifacts').setRequired(true))
-      .addChannelOption(option => option.setName('channel').setDescription('Channel (defaults to current)').setRequired(false))
-  )
-  .addSubcommand(subcommand =>
-    subcommand
-      .setName('verbose')
-      .setDescription('Quick toggle: surface usage/finishReason footer (defaults to current channel)')
-      .addBooleanOption(option => option.setName('enabled').setDescription('Show verbose footer').setRequired(true))
-      .addChannelOption(option => option.setName('channel').setDescription('Channel (defaults to current)').setRequired(false))
-  )
-  .addSubcommand(subcommand =>
-    subcommand
-      .setName('optinreply')
-      .setDescription('Quick toggle: gate non-addressed messages (defaults to current channel)')
-      .addBooleanOption(option => option.setName('enabled').setDescription('Enable opt-in reply gating').setRequired(true))
+      .addStringOption(option => option
+        .setName('value')
+        .setDescription('thinking: always|auto|never. show_code/verbose: true|false.')
+        .setRequired(true)
+      )
       .addChannelOption(option => option.setName('channel').setDescription('Channel (defaults to current)').setRequired(false))
   )
   .addSubcommandGroup(group =>
@@ -172,7 +161,7 @@ interface ExtraDeps {
       await access.setChannel(channel.id, enabled, requireMention)
       const flags = access.channelFlags(channel.id)
       return interaction.reply({
-        content: `✅ <#${channel.id}> configured. enabled=${enabled}, requireMention=${requireMention}. other flags (thinking=${flags.thinking}, showCode=${flags.showCode}, verbose=${flags.verbose}, optInReply=${flags.optInReply}, cache=${flags.cache}) — change via /gemini thinking|showcode|verbose|optinreply|cache.`,
+        content: `✅ <#${channel.id}> configured. enabled=${enabled}, requireMention=${requireMention}. other flags (thinking=${flags.thinking}, showCode=${flags.showCode}, verbose=${flags.verbose}, cache=${flags.cache}) — change via \`/gemini set\` or \`/gemini cache\`.`,
         ephemeral: true
       })
     }
@@ -183,67 +172,54 @@ interface ExtraDeps {
       return interaction.reply({ content: `✅ Persona swapped to \`${filename}\`.`, ephemeral: true })
     }
 
-    if (subcommand === 'thinking') {
-      const mode = interaction.options.getString('mode', true) as 'always' | 'auto' | 'never'
+    // Unified per-flag setter — replaces /gemini thinking|showcode|verbose.
+    // optInReply was dropped 2026-05-02 (gate behavior was confusing in
+    // practice). Cache toggle stays under the cache subcommand group below.
+    if (subcommand === 'set') {
+      const flag = interaction.options.getString('flag', true)
+      const rawValue = interaction.options.getString('value', true).trim().toLowerCase()
       const channel = interaction.options.getChannel('channel') ?? interaction.channel
       if (!channel) {
         return interaction.reply({ content: '❌ No channel resolved (run from inside a channel or pass the channel arg).', ephemeral: true })
       }
-      try {
-        const updated = await access.setChannelFlags(channel.id, { thinking: mode })
-        return interaction.reply({
-          content: `✅ <#${channel.id}> thinking → \`${mode}\` (showCode=${updated.showCode}, requireMention=${updated.requireMention})`,
-          ephemeral: true
-        })
-      } catch (e: any) {
-        return interaction.reply({ content: `❌ ${e.message}`, ephemeral: true })
-      }
-    }
 
-    if (subcommand === 'showcode') {
-      const enabled = interaction.options.getBoolean('enabled', true)
-      const channel = interaction.options.getChannel('channel') ?? interaction.channel
-      if (!channel) {
-        return interaction.reply({ content: '❌ No channel resolved (run from inside a channel or pass the channel arg).', ephemeral: true })
-      }
       try {
-        const updated = await access.setChannelFlags(channel.id, { showCode: enabled })
-        return interaction.reply({
-          content: `✅ <#${channel.id}> showCode → \`${enabled}\` (thinking=${updated.thinking}, requireMention=${updated.requireMention})`,
-          ephemeral: true
-        })
-      } catch (e: any) {
-        return interaction.reply({ content: `❌ ${e.message}`, ephemeral: true })
-      }
-    }
+        let updated
+        if (flag === 'thinking') {
+          if (!['always', 'auto', 'never'].includes(rawValue)) {
+            return interaction.reply({
+              content: `❌ \`thinking\` value must be one of: always, auto, never (got \`${rawValue}\`)`,
+              ephemeral: true
+            })
+          }
+          updated = await access.setChannelFlags(channel.id, { thinking: rawValue as ThinkingMode })
+        } else if (flag === 'show_code' || flag === 'verbose') {
+          // Accept canonical bool tokens. Reject anything ambiguous so the
+          // user knows they typed something wrong vs. silently being parsed
+          // as false.
+          const truthy = ['true', 't', 'yes', 'y', 'on', '1']
+          const falsy = ['false', 'f', 'no', 'n', 'off', '0']
+          let parsed: boolean
+          if (truthy.includes(rawValue)) parsed = true
+          else if (falsy.includes(rawValue)) parsed = false
+          else {
+            return interaction.reply({
+              content: `❌ \`${flag}\` value must be true or false (got \`${rawValue}\`)`,
+              ephemeral: true
+            })
+          }
+          const fieldKey = flag === 'show_code' ? 'showCode' : 'verbose'
+          updated = await access.setChannelFlags(channel.id, { [fieldKey]: parsed })
+        } else {
+          return interaction.reply({
+            content: `❌ unknown flag \`${flag}\`. Choices: thinking, show_code, verbose. (cache toggles via \`/gemini cache on|off\`.)`,
+            ephemeral: true
+          })
+        }
 
-    if (subcommand === 'verbose') {
-      const enabled = interaction.options.getBoolean('enabled', true)
-      const channel = interaction.options.getChannel('channel') ?? interaction.channel
-      if (!channel) {
-        return interaction.reply({ content: '❌ No channel resolved (run from inside a channel or pass the channel arg).', ephemeral: true })
-      }
-      try {
-        const updated = await access.setChannelFlags(channel.id, { verbose: enabled })
+        const summary = `thinking=${updated.thinking}, showCode=${updated.showCode}, verbose=${updated.verbose}, cache=${updated.cache}`
         return interaction.reply({
-          content: `✅ <#${channel.id}> verbose → \`${enabled}\` (thinking=${updated.thinking}, showCode=${updated.showCode})`,
-          ephemeral: true
-        })
-      } catch (e: any) {
-        return interaction.reply({ content: `❌ ${e.message}`, ephemeral: true })
-      }
-    }
-
-    if (subcommand === 'optinreply') {
-      const enabled = interaction.options.getBoolean('enabled', true)
-      const channel = interaction.options.getChannel('channel') ?? interaction.channel
-      if (!channel) {
-        return interaction.reply({ content: '❌ No channel resolved (run from inside a channel or pass the channel arg).', ephemeral: true })
-      }
-      try {
-        const updated = await access.setChannelFlags(channel.id, { optInReply: enabled })
-        return interaction.reply({
-          content: `✅ <#${channel.id}> optInReply → \`${enabled}\` — Gemma will gate non-addressed messages with a cheap classifier (thinking=${updated.thinking}, showCode=${updated.showCode}, verbose=${updated.verbose})`,
+          content: `✅ <#${channel.id}> \`${flag}\` set. ${summary}`,
           ephemeral: true
         })
       } catch (e: any) {

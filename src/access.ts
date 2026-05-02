@@ -8,10 +8,9 @@ export interface ChannelConfig {
   enabled: boolean
   requireMention: boolean
   thinking?: ThinkingMode  // default "auto" — Gemma decides per message
-  showCode?: boolean       // default false — don't render code-exec artifacts
-  verbose?: boolean        // default false — surface usage/finishReason footer
-  optInReply?: boolean     // default false — when true, gate non-addressed messages with a cheap classifier instead of always replying
-  cache?: boolean          // default false — when true, cache the stable system-prompt prefix server-side for cheaper input billing
+  showCode?: boolean       // default true — render code-exec artifacts + tool calls
+  verbose?: boolean        // default true — surface usage/finishReason footer
+  cache?: boolean          // default true — cache the stable system-prompt prefix server-side
   cacheTtlSec?: number     // optional — override the cache TTL (seconds). Falls back to manager default when unset
 }
 
@@ -19,7 +18,6 @@ export interface ChannelFlags {
   thinking: ThinkingMode
   showCode: boolean
   verbose: boolean
-  optInReply: boolean
   cache: boolean
   cacheTtlSec: number | null
 }
@@ -40,15 +38,15 @@ const VALID_THINKING_MODES: ThinkingMode[] = ['always', 'auto', 'never']
 
 // Default rendering/behavior flags applied when a channel is first configured
 // without explicit flag overrides, and when channelFlags() is asked about an
-// unknown channel. Updated 2026-05-02: showCode/verbose/optInReply/cache all
-// defaulted to true based on operational preference (more transparent output
-// + cheaper bills + less noise on busy channels). thinking stays "auto" since
-// "always" is too verbose for casual chat.
+// unknown channel. showCode/verbose/cache default true — more transparent
+// output + cheaper bills. thinking stays "auto" since "always" is too verbose
+// for casual chat. The optInReply gate was removed 2026-05-02 — Jeff found it
+// UX-confusing in practice and the cost savings weren't worth the hidden
+// silence-on-non-mention behavior.
 const DEFAULT_FLAGS = {
   thinking: 'auto' as ThinkingMode,
   showCode: true,
   verbose: true,
-  optInReply: true,
   cache: true,
 }
 
@@ -138,7 +136,6 @@ export class AccessManager {
       thinking: flags?.thinking ?? existing?.thinking ?? DEFAULT_FLAGS.thinking,
       showCode: flags?.showCode ?? existing?.showCode ?? DEFAULT_FLAGS.showCode,
       verbose: flags?.verbose ?? existing?.verbose ?? DEFAULT_FLAGS.verbose,
-      optInReply: flags?.optInReply ?? existing?.optInReply ?? DEFAULT_FLAGS.optInReply,
       cache: flags?.cache ?? existing?.cache ?? DEFAULT_FLAGS.cache,
       ...(flags?.cacheTtlSec != null
         ? { cacheTtlSec: flags.cacheTtlSec }
@@ -165,7 +162,6 @@ export class AccessManager {
       ...(patch.thinking !== undefined ? { thinking: patch.thinking } : {}),
       ...(patch.showCode !== undefined ? { showCode: patch.showCode } : {}),
       ...(patch.verbose !== undefined ? { verbose: patch.verbose } : {}),
-      ...(patch.optInReply !== undefined ? { optInReply: patch.optInReply } : {}),
       ...(patch.cache !== undefined ? { cache: patch.cache } : {}),
       // null sentinel = clear the override (back to manager default).
       // Skipping the field entirely means "leave existing override alone".
@@ -185,7 +181,6 @@ export class AccessManager {
       thinking: channel?.thinking ?? DEFAULT_FLAGS.thinking,
       showCode: channel?.showCode ?? DEFAULT_FLAGS.showCode,
       verbose: channel?.verbose ?? DEFAULT_FLAGS.verbose,
-      optInReply: channel?.optInReply ?? DEFAULT_FLAGS.optInReply,
       cache: channel?.cache ?? DEFAULT_FLAGS.cache,
       cacheTtlSec: channel?.cacheTtlSec ?? null
     }
