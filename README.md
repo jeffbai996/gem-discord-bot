@@ -154,15 +154,15 @@ All runtime state lives in `~/.gemini/channels/discord/` (override via `DISCORD_
 
 ## Deploy
 
-Runs on fragserv (WSL) as a systemd user service (`gemma.service`). Node 22 via nvm.
+Runs as a systemd user service (`gemma.service`) on Node 22+ via nvm.
 
 ```bash
-# Local edit, push, redeploy:
-git push origin main
-ssh baila@fragserv 'wsl -u jbai -e bash -lc ". /home/jbai/.nvm/nvm.sh && cd ~/repos/gem-discord-bot && git pull && npm install && systemctl --user restart gemma"'
+# On the host: pull + redeploy
+cd ~/repos/gem-discord-bot && git pull && npm install
+systemctl --user restart gemma
 
 # Hot reload (access.json + persona.md only, no code reload):
-ssh baila@fragserv 'wsl -u jbai -e bash -lc "systemctl --user kill -s HUP gemma"'
+systemctl --user kill -s HUP gemma
 ```
 
 Logs: `~/.gemini/channels/discord/gemma.log`. Service tail: `systemctl --user status gemma`.

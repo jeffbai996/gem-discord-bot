@@ -20,19 +20,12 @@ A standalone Discord bot using Discord.js and Gemini 2.0. It acts as an intellig
 
 ## Deployment
 
-Runs on fragserv (WSL) as a systemd user service (`gemma.service`). Node 22 via nvm (`~/.nvm/versions/node/v22.22.2/bin/node`). The service invokes `node --import tsx/esm src/gemma.ts`.
+Runs as a systemd user service (`gemma.service`) on Node 22+ via nvm. The service invokes `node --import tsx/esm src/gemma.ts`. Host-specific deploy commands (SSH targets, paths) live in `README_PRIVATE.md` (gitignored).
 
-Deploy flow:
-
-```bash
-git push origin main
-ssh baila@fragserv 'wsl -u jbai -e bash -lc ". /home/jbai/.nvm/nvm.sh && cd ~/repos/gem-discord-bot && git pull && npm install && systemctl --user restart gemma"'
-```
-
-Hot reload (no restart — reloads `access.json` and `persona.md` only):
+The service supports hot reload of `access.json` and `persona.md` via `SIGHUP` — no full restart needed for permission/persona edits:
 
 ```bash
-ssh baila@fragserv 'wsl -u jbai -e bash -lc "systemctl --user kill -s HUP gemma"'
+systemctl --user kill -s HUP gemma
 ```
 
 Logs: `~/.gemini/channels/discord/gemma.log`.
