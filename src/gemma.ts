@@ -68,8 +68,7 @@ await access.load()
 await persona.load()
 
 // Token count formatter — thousands-separated decimal (e.g. 14,200 not
-// 14.2K). Easier to compare against per-call cost calculations and matches
-// the format Jeff prefers for reading raw numbers.
+// 14.2K). Easier to compare against per-call cost calculations.
 function formatTokenCount(n: number): string {
   return n.toLocaleString('en-US')
 }
@@ -124,7 +123,7 @@ client.once('ready', async () => {
   console.error(`Gemma online as ${client.user?.tag} (${client.user?.id})`)
   client.user?.setPresence({
     status: 'online',
-    activities: [{ name: 'surviving Jeff\'s UX feedback loop', type: ActivityType.Playing }]
+    activities: [{ name: 'surviving the UX feedback loop', type: ActivityType.Playing }]
   })
 
   try {

@@ -40,8 +40,8 @@ const VALID_THINKING_MODES: ThinkingMode[] = ['always', 'auto', 'never']
 // without explicit flag overrides, and when channelFlags() is asked about an
 // unknown channel. showCode/verbose/cache default true — more transparent
 // output + cheaper bills. thinking stays "auto" since "always" is too verbose
-// for casual chat. The optInReply gate was removed 2026-05-02 — Jeff found it
-// UX-confusing in practice and the cost savings weren't worth the hidden
+// for casual chat. The optInReply gate was removed 2026-05-02 — UX-confusing
+// in practice and the cost savings weren't worth the hidden
 // silence-on-non-mention behavior.
 const DEFAULT_FLAGS = {
   thinking: 'auto' as ThinkingMode,

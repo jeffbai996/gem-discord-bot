@@ -41,8 +41,8 @@ const CACHE_MIN_TOKENS: Record<string, number> = {
   'gemini-3.1-pro-preview': 4096,
 }
 
-// Bumped from the Google default of 1h. Multi-hour conversations are the
-// dominant gemma pattern (Jeff + 蛋 + bots talking on and off across an
+// Bumped from the Google default of 1h. Multi-hour group chats are the
+// dominant gemma pattern (humans + bots talking on and off across an
 // evening); a 2-hour TTL keeps the cache warm through the typical session
 // without paying meaningful extra storage. The first message after the TTL
 // expires pays full price; everything in-window saves ~75%.
