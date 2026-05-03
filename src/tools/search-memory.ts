@@ -30,6 +30,9 @@ export const searchMemoryTool: Tool = {
     }
     console.error(`[RAG] Searching memory for query: "${query}" in channel ${ctx.channelId}`)
     const queryEmb = await ctx.gemini.embed(query)
+    if (!queryEmb) {
+      return 'Failed to generate embedding for search query.'
+    }
     const results = searchMessages(ctx.channelId, queryEmb, 10)
     return formatSearchResults(results)
   }

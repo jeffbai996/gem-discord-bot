@@ -53,19 +53,18 @@ export function insertMessage(
   authorName: string,
   content: string,
   timestamp: string,
-  embeddingArray: number[]
+  embeddingArray: number[] | null
 ) {
-  // Convert embedding array to a JSON string or buffer depending on what vss0 expects.
-  // sqlite-vss expects a JSON array string representation.
-  const embeddingJson = JSON.stringify(embeddingArray)
-
   const transaction = db.transaction(() => {
     const info = insertMsgStmt.run(id, channelId, authorName, content, timestamp)
     // Use lastInsertRowid to map the vss row back to the message table.
     // However, since id is a TEXT (Discord ID), we need a rowid binding.
     // Let's alter the schema slightly or use a mapping table, OR just rely on SQLite's internal rowid.
     // better-sqlite3 info.lastInsertRowid gives the rowid of the newly inserted message.
-    if (info.changes > 0) {
+    if (info.changes > 0 && embeddingArray !== null) {
+      // Convert embedding array to a JSON string or buffer depending on what vss0 expects.
+      // sqlite-vss expects a JSON array string representation.
+      const embeddingJson = JSON.stringify(embeddingArray)
       insertVssStmt.run(info.lastInsertRowid, embeddingJson)
     }
   })

@@ -5,6 +5,7 @@ import { isAllowedMime } from './attachments.ts'
 import type { ThinkingMode } from './access.ts'
 import { ToolRegistry } from './tools/registry.ts'
 import { GeminiCacheManager, type CachedRef } from './cache.ts'
+import fs from 'fs'
 
 // Thrown when Gemini rejects the request payload itself (HTTP 400). The
 // gemma.ts message handler catches this to surface a specific error to the
@@ -587,32 +588,47 @@ export class GeminiClient {
     return tools
   }
 
-  async embed(text: string): Promise<number[]> {
+  async embed(text: string): Promise<number[] | null> {
     // gemini-embedding-001 is the current embedding model; text-embedding-004
     // returned 404 as of 2026-04-20. Requesting 768-dim output to match the
     // sqlite-vss schema (db.ts creates vss_messages with embedding(768)).
     // The JS SDK's embedContent doesn't expose outputDimensionality directly,
     // so we hit the REST endpoint manually.
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=${this.apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          content: { parts: [{ text }] },
-          outputDimensionality: 768
-        })
+    const backoffs = [1000, 4000, 16000]
+    for (let attempt = 0; attempt <= backoffs.length; attempt++) {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=${this.apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            content: { parts: [{ text }] },
+            outputDimensionality: 768
+          })
+        }
+      )
+
+      if (!res.ok) {
+        if (res.status === 404 || res.status === 429) {
+          if (attempt < backoffs.length) {
+            await new Promise(r => setTimeout(r, backoffs[attempt]))
+            continue
+          } else {
+            fs.appendFileSync('embed_failures.log', `[${new Date().toISOString()}] Embedding failed with ${res.status}: ${await res.text()}\n`)
+            return null
+          }
+        }
+        throw new Error(`embedContent HTTP ${res.status}: ${await res.text()}`)
       }
-    )
-    if (!res.ok) {
-      throw new Error(`embedContent HTTP ${res.status}: ${await res.text()}`)
+
+      const data = await res.json() as { embedding?: { values?: number[] } }
+      const values = data.embedding?.values
+      if (!Array.isArray(values) || values.length !== 768) {
+        throw new Error(`embedContent returned unexpected shape: ${JSON.stringify(data).slice(0, 200)}`)
+      }
+      return values
     }
-    const data = await res.json() as { embedding?: { values?: number[] } }
-    const values = data.embedding?.values
-    if (!Array.isArray(values) || values.length !== 768) {
-      throw new Error(`embedContent returned unexpected shape: ${JSON.stringify(data).slice(0, 200)}`)
-    }
-    return values
+    return null
   }
 
   async countTokens(contents: Content[]): Promise<number> {
